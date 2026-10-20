@@ -406,7 +406,22 @@ export async function deliverBrief(
   }
 
   try {
-    await agent.followup(brief, { source: { kind: 'plugin' } })
+    /*
+     * The brief must be a message, not a bare string.
+     *
+     * `followup` takes a `UserMessage`, whose `content` is a block array. Passing
+     * a string made the harness read `content.kind` on a primitive and fail with
+     * "Cannot read properties of undefined (reading 'kind')" — the new session
+     * was created, received nothing, and the error surfaced as a failed task.
+     */
+    await agent.followup(
+      {
+        role: 'user',
+        source: { kind: 'plugin' },
+        content: [{ type: 'text', text: brief }],
+      } as never,
+      { source: { kind: 'plugin' } } as never,
+    )
     return { delivered: true, outcome: { item: 'brief', status: 'inherited', detail: '已投递' } }
   } catch (error) {
     return {

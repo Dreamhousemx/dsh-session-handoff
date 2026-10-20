@@ -37,6 +37,14 @@ export interface Config {
   actionDeadlineMs: number
   /** Scroll the browser to the new session once a handoff completes. */
   openNewSessionOnHandoff: boolean
+  /**
+   * Archive (and stop) the source session once the brief has been delivered.
+   *
+   * On by default: a session whose task moved elsewhere otherwise keeps showing
+   * in the sidebar as if it were still the active one. Turning it off leaves it
+   * running and visible, which is what you want when comparing the two.
+   */
+  archiveSourceAfterHandoff: boolean
 }
 
 /**
@@ -73,6 +81,7 @@ export const Config: Schema<Config> = Schema.object({
   stepWaitTimeoutMs: Schema.number().min(1000).step(1).default(900_000),
   actionDeadlineMs: Schema.number().min(1000).step(1).default(1_800_000),
   openNewSessionOnHandoff: Schema.boolean().default(true),
+  archiveSourceAfterHandoff: Schema.boolean().default(true),
 })
 
 /**

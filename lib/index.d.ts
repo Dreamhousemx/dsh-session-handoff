@@ -30,6 +30,14 @@ interface Config {
   actionDeadlineMs: number;
   /** Scroll the browser to the new session once a handoff completes. */
   openNewSessionOnHandoff: boolean;
+  /**
+   * Archive (and stop) the source session once the brief has been delivered.
+   *
+   * On by default: a session whose task moved elsewhere otherwise keeps showing
+   * in the sidebar as if it were still the active one. Turning it off leaves it
+   * running and visible, which is what you want when comparing the two.
+   */
+  archiveSourceAfterHandoff: boolean;
 }
 /**
  * The configuration contract.

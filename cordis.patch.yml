@@ -25,3 +25,4 @@
         stepWaitTimeoutMs: 900000
         actionDeadlineMs: 1800000
         openNewSessionOnHandoff: true
+        archiveSourceAfterHandoff: true

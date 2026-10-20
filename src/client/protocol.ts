@@ -59,6 +59,8 @@ export interface HandoffSettings {
   stepWaitTimeoutMs: number
   actionDeadlineMs: number
   openNewSessionOnHandoff: boolean
+  /** Archive and stop the source session once the brief is delivered. */
+  archiveSourceAfterHandoff: boolean
 }
 
 /** Defaults shown before the host answers. */
@@ -77,6 +79,7 @@ export const DEFAULT_SETTINGS: HandoffSettings = {
   stepWaitTimeoutMs: 900_000,
   actionDeadlineMs: 1_800_000,
   openNewSessionOnHandoff: true,
+  archiveSourceAfterHandoff: true,
 }
 
 /**

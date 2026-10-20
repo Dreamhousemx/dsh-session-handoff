@@ -252,7 +252,10 @@ describe('Coordinator — compaction', () => {
     })
 
     expect(result.ok).toBe(true)
-    expect(followup).toHaveBeenCalledWith('继续完成刚才的任务。', { source: { kind: 'plugin' } })
+    expect(followup).toHaveBeenCalledWith(
+      expect.objectContaining({ role: 'user', content: [{ type: 'text', text: '继续完成刚才的任务。' }] }),
+      expect.anything(),
+    )
   })
 
   it('treats "nothing to compact" as success', async () => {
@@ -341,7 +344,7 @@ describe('Coordinator — retirement order', () => {
 
     expect(result.ok).toBe(true)
     expect(events).toEqual(['created+delivered', 'retired'])
-    expect(result.text).toContain('原会话已退役')
+    expect(result.text).toContain('原会话处理完毕')
   })
 
   it('never retires when the migration failed', async () => {
@@ -369,7 +372,7 @@ describe('Coordinator — retirement order', () => {
     const result = await coordinator.run(handoff(idleAgent()))
 
     expect(result.ok).toBe(true)
-    expect(result.text).toContain('退役失败')
+    expect(result.text).toContain('归档失败')
     expect(result.text).toContain('不影响新会话')
   })
 

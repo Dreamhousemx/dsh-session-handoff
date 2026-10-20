@@ -62,6 +62,7 @@ const baseConfig = {
   stepWaitTimeoutMs: 900_000,
   actionDeadlineMs: 1_800_000,
   openNewSessionOnHandoff: true,
+    archiveSourceAfterHandoff: true,
 }
 
 describe('plugin identity', () => {

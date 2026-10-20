@@ -246,6 +246,18 @@ export function apply(ctx: Context, config: ConfigShape): void {
      * does not delete history.
      */
     retire: async (sessionId, newSessionId) => {
+      /*
+       * Archiving the source is a preference, not a law.
+       *
+       * It defaults on because a session whose task moved otherwise sits in the
+       * sidebar as if it were still the one to continue in. Turning it off keeps
+       * the old session visible and running, which is what you want when
+       * comparing the two or when the brief needs a second look.
+       */
+      if (!live.archiveSourceAfterHandoff) {
+        log(`dsh-session-handoff: 旧会话 ${sessionId} 保持运行（设置要求不归档）`)
+        return
+      }
       const registry = readServices(host).workspaceRegistry
       if (registry === undefined) {
         throw new Error('当前部署没有 workspaceRegistry，无法归档旧会话')

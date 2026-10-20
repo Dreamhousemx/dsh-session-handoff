@@ -465,6 +465,20 @@ function Advanced(input: {
             }),
             '交接完成后浏览器切到新会话。',
           ),
+          row(
+            '交接后归档旧会话',
+            h('input', {
+              type: 'checkbox',
+              role: 'switch',
+              'aria-checked': input.settings.archiveSourceAfterHandoff ? 'true' : 'false',
+              'data-dsh-field': 'archiveSourceAfterHandoff',
+              checked: input.settings.archiveSourceAfterHandoff,
+              disabled: input.disabled,
+              onChange: (event: { target: { checked: boolean } }) =>
+                input.patch({ archiveSourceAfterHandoff: event.target.checked }),
+            }),
+            '开启：简报投递成功后归档并停止旧会话（历史可回看）。关闭：旧会话保持运行，便于对照两边。',
+          ),
         )
       : null,
   )

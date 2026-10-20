@@ -28,6 +28,7 @@ function cfg(overrides: Partial<Config> = {}): Config {
     stepWaitTimeoutMs: 900_000,
     actionDeadlineMs: 1_800_000,
     openNewSessionOnHandoff: true,
+    archiveSourceAfterHandoff: true,
     ...overrides,
   }
 }

@@ -333,9 +333,11 @@ export class Coordinator {
     if (retire === undefined) return ''
     try {
       await retire(sessionId, newSessionId)
-      return '原会话已退役（日志保留，可回看）。'
+      // The host hook decides whether it archived or left the session running
+      // (a user preference), so the report must not assert which one happened.
+      return '原会话处理完毕（日志保留，可回看）。'
     } catch (error) {
-      return `原会话退役失败（不影响新会话）：${messageOf(error)}`
+      return `原会话归档失败（不影响新会话）：${messageOf(error)}`
     }
   }
 
@@ -394,7 +396,15 @@ export class Coordinator {
     // Only wake a session whose turn this action interrupted.
     if (outcome.continuesTask && typeof agent.followup === 'function') {
       try {
-        await agent.followup('继续完成刚才的任务。', { source: { kind: 'plugin' } })
+        // A message shape, not a bare string: `content` is a block array.
+        await agent.followup(
+          {
+            role: 'user',
+            source: { kind: 'plugin' },
+            content: [{ type: 'text', text: '继续完成刚才的任务。' }],
+          } as never,
+          { source: { kind: 'plugin' } } as never,
+        )
       } catch {
         // The compaction succeeded; failing the whole action over the nudge
         // would hide that.
