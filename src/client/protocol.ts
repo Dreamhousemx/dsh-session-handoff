@@ -96,11 +96,17 @@ export function blockingReason(settings: HandoffSettings): string | undefined {
   return undefined
 }
 
-/** Warnings the card can raise without the host. */
+/**
+ * Warnings the card can raise without the host.
+ *
+ * Mirrors `validateSettings` on the host: a low threshold is a legitimate
+ * choice, so the warning fires only below 20% and only while automation is on.
+ * Duplicating a different rule here is what made 40% complain about "阈值偏小".
+ */
 export function localWarnings(settings: HandoffSettings): readonly string[] {
   const warnings: string[] = []
-  if (settings.autoHandoffAtContextPercent < 50) {
-    warnings.push('交接阈值偏小，会话可能很早就被交出去。')
+  if (settings.autoHandoffEnabled && settings.autoHandoffAtContextPercent < 20) {
+    warnings.push('阈值低于 20%：会话可能发几条消息就被交接，新会话的时间大多花在读简报上。')
   }
   if (settings.evaluateIntervalMs > 60_000) {
     warnings.push('评估间隔超过 1 分钟，上下文可能在这期间撞满窗口。')

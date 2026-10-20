@@ -504,6 +504,53 @@ export function apply(ctx: Context, config: ConfigShape): void {
             return
           }
 
+          /*
+           * Persist settings through the host's own config editor.
+           *
+           * The Configuration page cannot write through the browser mirror on
+           * this build, so the card posts here instead. `configEditor.edit`
+           * applies the change through the normal Loader path, which means the
+           * schema still validates it and the row is re-applied — the same two
+           * things a hand-edited profile file would go through.
+           *
+           * Handled before the `sessionId` check because settings are global to
+           * the plugin, not to a conversation.
+           */
+          if (action === 'settings') {
+            const patch = (await readJsonBody(req)) as { settings?: unknown }
+            const next = patch.settings
+            if (next === null || typeof next !== 'object') {
+              sendJson(res, 400, { ok: false, error: '缺少 settings 对象' })
+              return
+            }
+            const editor = readServices(host).configEditor
+            if (editor?.edit === undefined || editor.configuration === undefined) {
+              sendJson(res, 400, { ok: false, error: '当前部署没有 configEditor，无法保存设置' })
+              return
+            }
+            try {
+              const entries = editor.configuration()
+              const row = entries.find(
+                (entry) =>
+                  entry.entry?.id === 'include:dsh-session-handoff' ||
+                  entry.entry?.id === 'dsh-session-handoff',
+              )
+              if (row?.entry === undefined) {
+                sendJson(res, 404, { ok: false, error: '找不到本插件的配置行' })
+                return
+              }
+              const desired = next as Record<string, unknown>
+              await editor.edit(row.entry, (current) => ({ ...current, ...desired }))
+              sendJson(res, 200, { ok: true, text: '设置已保存，立即生效。' })
+            } catch (error) {
+              sendJson(res, 500, {
+                ok: false,
+                error: `保存失败：${error instanceof Error ? error.message : String(error)}`,
+              })
+            }
+            return
+          }
+
           const body = (await readJsonBody(req)) as { sessionId?: unknown }
           const sessionId = typeof body.sessionId === 'string' ? body.sessionId : undefined
           if (sessionId === undefined) {

@@ -268,6 +268,26 @@ export interface CommandsLike {
 }
 
 /**
+ * `ctx.configEditor` — the host's own "write this row's config" path.
+ *
+ * This is the supported way to persist a plugin's configuration from its own
+ * code: it applies the change through the normal Loader path, so validation and
+ * re-application both happen exactly as they do when the user edits the file.
+ * Writing the profile YAML by hand would bypass both.
+ */
+export interface ConfigEditorLike {
+  entries?(): readonly unknown[]
+  /** Apply a change to one entry's raw config. */
+  edit?(entry: unknown, change: (current: Record<string, unknown>) => Record<string, unknown>): Promise<void>
+  /** The current composed entry list, for locating this plugin's own row. */
+  configuration?(): readonly {
+    readonly entry?: { readonly id?: string }
+    readonly inherited?: Record<string, unknown>
+    readonly override?: Record<string, unknown>
+  }[]
+}
+
+/**
  * `ctx.sessions` — the in-memory session store.
  *
  * It stores **Session** objects, not agents: `get()` returns the log handle.
@@ -300,4 +320,5 @@ export interface HostServices {
   compaction: CompactionLike | undefined
   llm: LlmLike | undefined
   commands: CommandsLike | undefined
+  configEditor: ConfigEditorLike | undefined
 }

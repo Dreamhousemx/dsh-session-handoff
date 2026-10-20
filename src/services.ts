@@ -16,6 +16,7 @@ import type {
   AgentDefaultModelLike,
   ApprovalLike,
   CommandsLike,
+  ConfigEditorLike,
   CompactionLike,
   HostServices,
   LlmLike,
@@ -55,6 +56,7 @@ export function readServices(host: ServiceHost): HostServices {
     compaction: get<CompactionLike>('compaction'),
     llm: get<LlmLike>('llm'),
     commands: get<CommandsLike>('commands'),
+    configEditor: get<ConfigEditorLike>('configEditor'),
   }
 }
 

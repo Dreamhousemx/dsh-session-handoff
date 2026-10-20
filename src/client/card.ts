@@ -364,7 +364,15 @@ export function HandoffCard(props: CardProps): unknown {
     blocking === undefined ? null : notice(blocking, 'danger'),
     saveError === undefined ? null : notice(saveError, 'danger'),
     ...warnings.map((warning) => notice(warning, 'warn')),
-    settings.autoHandoffTrigger !== 'cumulative' && state?.occupancy.window === undefined
+    /*
+     * Only warn about a missing window when there is a live session to warn
+     * about. On the Settings page no conversation is open, so `state` is absent
+     * and reporting "模型没有上报上下文窗口" would be an accusation against a
+     * model that was never asked.
+     */
+    state !== undefined &&
+    settings.autoHandoffTrigger !== 'cumulative' &&
+    state.occupancy.window === undefined
       ? notice('当前模型没有上报上下文窗口，占用率触发不会生效；仍可用累计消费或手动 /handoff。', 'warn')
       : null,
   )

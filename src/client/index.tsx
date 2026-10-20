@@ -303,22 +303,28 @@ export function apply(ctx: ClientContext): void {
   }
 
   /**
-   * Persist the form.
+   * Persist the form through the plugin's own Host route.
    *
-   * Re-resolves the scope at call time: the mirror can populate after this half
-   * activates, so a scope captured at startup may be stale by the time the user
-   * presses Save. Failing that, the message names the namespaces tried, because
-   * "表单未就绪" alone gives a user nothing to act on.
+   * The browser settings mirror is not a reliable write path for a static
+   * plugin bundle on this build: its scope is keyed by an entry id the client
+   * cannot always resolve, which is what produced "宿主的设置表单未就绪". The
+   * host already owns a supported write path (`configEditor.edit`), and this
+   * plugin already has an authenticated loopback route, so the card posts the
+   * form there. The host validates the patch through the normal schema and
+   * re-applies the row, exactly as a hand-edited profile would.
+   *
+   * The mirror is still read (when available) so the form opens on saved values.
    */
   const saveSettings = async (next: HandoffSettings): Promise<void> => {
-    if (settingsScope?.set === undefined) settingsScope = resolveFrom(undefined)
-    if (settingsScope?.set === undefined) {
-      throw new Error(
-        `宿主的设置表单未就绪，无法保存（已尝试 ${SETTINGS_CANDIDATES.join(' / ')}）。` +
-          '若刚安装插件，请重启 dsh 后重试。',
-      )
+    const response = await fetch('/dsh-session-handoff/settings', {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ settings: next }),
+    })
+    const payload = (await response.json().catch(() => ({}))) as { ok?: boolean; error?: string }
+    if (payload.ok !== true) {
+      throw new Error(payload.error ?? `保存失败（HTTP ${response.status}）`)
     }
-    await settingsScope.set(next as Partial<HandoffSettings>)
   }
 
   /*
