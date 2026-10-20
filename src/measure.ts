@@ -89,6 +89,20 @@ export function readContextOccupancy(
     window = undefined
   }
 
+  /*
+   * Fall back to the durable log.
+   *
+   * `requestContext()` reports the CURRENT request envelope, which is absent for
+   * an idle session or one restored without resuming. The model and its window
+   * are still recorded in the `request/context` event that established them, so
+   * without this fallback an idle session reports "model did not report a
+   * context window" while the composer's own meter is happily showing a
+   * percentage — two numbers disagreeing about the same session.
+   */
+  if (window === undefined) {
+    window = windowFromEvents(session.events)
+  }
+
   // A window of zero or a negative value is a broken report, not a full context.
   const usableWindow =
     typeof window === 'number' && Number.isFinite(window) && window > 0 ? window : undefined
@@ -213,4 +227,24 @@ export function foldUsageFromEvents(events: readonly SessionEventLike[] | undefi
 export function percentOf(occupancy: ContextOccupancy): number | undefined {
   if (occupancy.percent === undefined) return undefined
   return Math.round(occupancy.percent * 100)
+}
+
+/**
+ * The last context window the log recorded for this session.
+ *
+ * Scans backwards because the newest `request/context` wins: switching models
+ * changes both the provider and the window, and an older event describes a model
+ * the session is no longer on.
+ */
+export function windowFromEvents(
+  events: readonly SessionEventLike[] | undefined,
+): number | undefined {
+  if (events === undefined) return undefined
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index]
+    if (event?.type !== 'request/context') continue
+    const value = event.data?.['contextWindow']
+    if (typeof value === 'number' && Number.isFinite(value) && value > 0) return value
+  }
+  return undefined
 }

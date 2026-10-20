@@ -4,6 +4,7 @@ import {
   percentOf,
   readContextOccupancy,
   readCumulativeUsage,
+  windowFromEvents,
 } from '@src/measure.ts'
 import type { SessionEventLike, SessionLike, TokenMeterLike } from '@src/contracts.ts'
 
@@ -176,5 +177,42 @@ describe('percentOf', () => {
     expect(
       percentOf({ quality: 'unavailable', used: 0, window: undefined, percent: undefined, baseline: 'none' }),
     ).toBeUndefined()
+  })
+})
+
+describe('windowFromEvents', () => {
+  it('reads the window from the durable request/context event', () => {
+    const events = [
+      { type: 'request/context', seq: 1, data: { contextWindow: 200_000 } },
+      { type: 'assistant/message', seq: 2, data: {} },
+    ]
+    expect(windowFromEvents(events)).toBe(200_000)
+  })
+
+  it('prefers the newest context event, because a model switch changes the window', () => {
+    const events = [
+      { type: 'request/context', seq: 1, data: { contextWindow: 200_000 } },
+      { type: 'request/context', seq: 9, data: { contextWindow: 1_000_000 } },
+    ]
+    expect(windowFromEvents(events)).toBe(1_000_000)
+  })
+
+  it('ignores a zero or malformed window', () => {
+    expect(windowFromEvents([{ type: 'request/context', seq: 1, data: { contextWindow: 0 } }])).toBeUndefined()
+    expect(windowFromEvents([{ type: 'request/context', seq: 1, data: {} }])).toBeUndefined()
+    expect(windowFromEvents(undefined)).toBeUndefined()
+  })
+
+  it('lets an idle session still report occupancy, which is what the UI needs', () => {
+    // The composer shows a percentage while the session is idle; `requestContext()`
+    // returns nothing then, so this fallback is the only thing keeping the two
+    // numbers consistent.
+    const idle = session({
+      requestContext: () => ({}),
+      events: [{ type: 'request/context', seq: 3, data: { contextWindow: 1_000_000 } }],
+    })
+    const result = readContextOccupancy(idle, meter({ surfaceTokens: 470_000 }))
+    expect(result.window).toBe(1_000_000)
+    expect(percentOf(result)).toBe(47)
   })
 })
