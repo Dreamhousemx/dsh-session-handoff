@@ -339,13 +339,52 @@ export function apply(ctx: Context, config: ConfigShape): void {
       if (sessionId !== undefined) monitor.forget(sessionId)
     })
 
+    /*
+     * The command and the HTTP channel are registered only once their services
+     * exist.
+     *
+     * `apply()` is called as soon as the services in `inject` are ready — which
+     * for this plugin means `sessions` only. `commands` and `webServer` are
+     * owned by other bundles that activate later, so reading them here returns
+     * `undefined` and the registrations are silently skipped: the plugin is
+     * "running", the row is "enabled", and `/handoff` does nothing and the
+     * status route 404s.
+     *
+     * `ctx.inject` starts a child fiber that waits for exactly those services.
+     * When they arrive the callback runs and its registrations ride that
+     * fiber's lifetime, so unloading still cleans up.
+     */
+    const registerLater = (services: readonly string[], label: string, run: () => (() => void) | undefined): void => {
+      try {
+        const injector = (ctx as unknown as { inject?: (deps: readonly string[], cb: () => void) => unknown }).inject
+        if (typeof injector === 'function') {
+          injector.call(ctx, services, () => {
+            try {
+              const disposer = run()
+              if (disposer !== undefined) ctx.effect(() => disposer, label)
+            } catch (error) {
+              host.logger?.error?.(error)
+            }
+          })
+          return
+        }
+      } catch (error) {
+        host.logger?.error?.(error)
+      }
+      // A context without `inject` (tests, or an older Cordis): run eagerly and
+      // degrade exactly as before.
+      const disposer = run()
+      if (disposer !== undefined) ctx.effect(() => disposer, label)
+    }
+
     // ---- command ----------------------------------------------------------
-    const commands = readServices(host).commands
-    let offCommand: (() => void) | undefined
-    if (commands === undefined) {
-      log('dsh-session-handoff: 没有 commands 服务，/handoff 命令不可用')
-    } else {
-      offCommand = commands.register({
+    registerLater(['commands'], 'dsh-session-handoff: /handoff', () => {
+      const commands = readServices(host).commands
+      if (commands === undefined) {
+        log('dsh-session-handoff: 没有 commands 服务，/handoff 命令不可用')
+        return undefined
+      }
+      return commands.register({
         name: 'handoff',
         description: '把当前会话交接到同工作区的新会话（status / cancel / retry）',
         input: { hint: 'status | cancel | retry' },
@@ -399,16 +438,17 @@ export function apply(ctx: Context, config: ConfigShape): void {
           }
         },
       })
-    }
+    })
 
     // ---- HTTP channel -----------------------------------------------------
-    const webServer = host.get('webServer') as
-      | { register(route: { kind: 'prefix'; path: string; handler: unknown }): () => void }
-      | undefined
-    let offRoute: (() => void) | undefined
-    if (webServer === undefined) {
-      log('dsh-session-handoff: 没有 webServer 服务，设置卡的状态通道不可用')
-    } else {
+    registerLater(['webServer'], 'dsh-session-handoff: routes', () => {
+      const webServer = host.get('webServer') as
+        | { register(route: { kind: 'prefix'; path: string; handler: unknown }): () => void }
+        | undefined
+      if (webServer === undefined) {
+        log('dsh-session-handoff: 没有 webServer 服务，设置页的状态通道不可用')
+        return undefined
+      }
       const handler = async (
         req: {
           url?: string
@@ -506,8 +546,8 @@ export function apply(ctx: Context, config: ConfigShape): void {
         }
       }
 
-      offRoute = webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler })
-    }
+      return webServer.register({ kind: 'prefix', path: ROUTE_PREFIX, handler })
+    })
 
     // ---- teardown ---------------------------------------------------------
     return () => {
@@ -515,8 +555,6 @@ export function apply(ctx: Context, config: ConfigShape): void {
       offPreStep?.()
       offEvent?.()
       offDisposed?.()
-      offCommand?.()
-      offRoute?.()
       monitor.dispose()
     }
   }, 'dsh-session-handoff')

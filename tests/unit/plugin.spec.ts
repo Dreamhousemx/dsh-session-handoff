@@ -258,3 +258,45 @@ describe('host contract shapes (0.2.1)', () => {
     expect(agentsGet).not.toHaveBeenCalled()
   })
 })
+
+describe('services that arrive after apply()', () => {
+  it('registers /handoff through ctx.inject when commands is not ready yet', async () => {
+    // The real failure: apply() runs as soon as `sessions` exists, so
+    // `commands` and `webServer` were undefined and both registrations were
+    // silently skipped. The row showed as running while /handoff did nothing.
+    const services: Record<string, unknown> = {}
+    const deferred: Array<() => void> = []
+    const fake = fakeContext(services)
+    ;(fake.ctx as unknown as { inject: (deps: readonly string[], cb: () => void) => void }).inject = (
+      deps,
+      callback,
+    ) => {
+      deferred.push(() => {
+        for (const dep of deps) expect(services[dep]).toBeDefined()
+        callback()
+      })
+    }
+
+    apply(fake.ctx as never, baseConfig)
+
+    // Nothing registered eagerly, and nothing threw.
+    expect(deferred.length).toBe(2)
+
+    // The services publish later, then the deferred bodies run.
+    const register = vi.fn(() => () => {})
+    services['commands'] = { register }
+    services['webServer'] = { register: vi.fn(() => () => {}) }
+    for (const run of deferred) run()
+
+    expect(register).toHaveBeenCalledTimes(1)
+    expect(String(register.mock.calls[0]?.[0] && (register.mock.calls[0]![0] as { name?: string }).name)).toBe(
+      'handoff',
+    )
+  })
+
+  it('never throws when a deferred dependency never arrives', () => {
+    const fake = fakeContext({})
+    ;(fake.ctx as unknown as { inject: (deps: readonly string[], cb: () => void) => void }).inject = () => {}
+    expect(() => apply(fake.ctx as never, baseConfig)).not.toThrow()
+  })
+})
