@@ -1,0 +1,9 @@
+# Normalize line endings so a Windows checkout and a Linux checkout of this
+# repository produce identical diffs.
+* text=auto eol=lf
+
+# Binary assets
+*.png binary
+*.jpg binary
+*.webp binary
+*.gif binary

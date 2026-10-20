@@ -1,0 +1,6 @@
+{
+  "meta": {
+    "title": "Session Handoff",
+    "description": "Hand a long session over to a fresh one in the same workspace once context usage or spend reaches a threshold, carrying its configuration across."
+  }
+}

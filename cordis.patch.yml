@@ -1,0 +1,27 @@
+# Register the session-handoff plugin as a profile-level row.
+#
+# The row carries the plugin's Config defaults, which is also its settings
+# surface: the Settings card writes through `settings.update(<entry id>, patch)`,
+# so this id and the card's namespace must stay identical.
+#
+# Automatic actions are OFF by default: installing this row adds the /handoff
+# command and the settings card, and changes nothing about how an existing
+# session runs until the user turns an automatic trigger on.
+- insert:
+    - id: dsh-session-handoff
+      name: dsh-session-handoff
+      config:
+        autoHandoffEnabled: false
+        autoHandoffTrigger: 'context'
+        autoHandoffAtContextPercent: 85
+        autoHandoffThreshold: 2000000
+        autoCompactEnabled: false
+        autoCompactAtContextPercent: 70
+        evaluateIntervalMs: 5000
+        contextRearmDeltaPercent: 10
+        rearmDeltaTokens: 200000
+        maxAutoActionsPerSession: 3
+        summaryMaxTokens: 4096
+        stepWaitTimeoutMs: 900000
+        actionDeadlineMs: 1800000
+        openNewSessionOnHandoff: true

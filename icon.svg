@@ -1,0 +1,8 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round">
+  <!-- Two session cards: the left one hands its baton to the right one. -->
+  <rect x="1.5" y="6" width="7" height="12" rx="1.6" />
+  <rect x="15.5" y="6" width="7" height="12" rx="1.6" />
+  <path d="M9.2 12h5.6" />
+  <path d="M12.6 9.8 14.8 12l-2.2 2.2" />
+  <path d="M4 9.4h2.2M4 12h2.2M4 14.6h2.2" opacity="0.55" />
+</svg>
