@@ -141,10 +141,19 @@ export function validateSettings(config: Config): {
     })
   }
 
-  if (config.autoHandoffAtContextPercent < 50) {
+  /*
+   * A low threshold is a legitimate choice, not a mistake.
+   *
+   * 40% is a perfectly reasonable handoff point for a cheap model with a big
+   * window, so warning at 50% told users their deliberate configuration was
+   * wrong. The warning now fires only where the behaviour gets genuinely
+   * pathological — below 20%, a session is handed over after a handful of
+   * messages and the new session spends its budget re-reading the brief.
+   */
+  if (config.autoHandoffAtContextPercent < 20 && config.autoHandoffEnabled) {
     warnings.push({
       field: 'autoHandoffAtContextPercent',
-      message: '交接阈值偏小，会话可能很早就被交出去，产生大量短会话。',
+      message: '阈值低于 20%：会话可能发几条消息就被交接，新会话的时间大多花在读简报上。',
     })
   }
 

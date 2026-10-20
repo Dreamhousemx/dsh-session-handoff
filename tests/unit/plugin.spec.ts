@@ -210,9 +210,27 @@ describe('Config schema', () => {
     expect(result.warnings.length).toBeGreaterThan(0)
   })
 
-  it('warns about a very low handoff threshold', () => {
-    const result = validateSettings({ ...baseConfig, autoHandoffAtContextPercent: 30 })
+  it('accepts 30% without complaint: a low threshold is a legitimate choice', () => {
+    const result = validateSettings({
+      ...baseConfig,
+      autoHandoffEnabled: true,
+      autoHandoffAtContextPercent: 30,
+    })
+    expect(result.warnings.some((w) => w.field === 'autoHandoffAtContextPercent')).toBe(false)
+  })
+
+  it('warns below 20%, where handoffs get pathological', () => {
+    const result = validateSettings({
+      ...baseConfig,
+      autoHandoffEnabled: true,
+      autoHandoffAtContextPercent: 10,
+    })
     expect(result.warnings.some((w) => w.field === 'autoHandoffAtContextPercent')).toBe(true)
+  })
+
+  it('stays quiet about the threshold while automation is off', () => {
+    const result = validateSettings({ ...baseConfig, autoHandoffAtContextPercent: 10 })
+    expect(result.warnings.some((w) => w.field === 'autoHandoffAtContextPercent')).toBe(false)
   })
 })
 
@@ -283,15 +301,13 @@ describe('services that arrive after apply()', () => {
     expect(deferred.length).toBe(2)
 
     // The services publish later, then the deferred bodies run.
-    const register = vi.fn(() => () => {})
+    const register = vi.fn((_definition: { name?: string }) => () => {})
     services['commands'] = { register }
     services['webServer'] = { register: vi.fn(() => () => {}) }
     for (const run of deferred) run()
 
     expect(register).toHaveBeenCalledTimes(1)
-    expect(String(register.mock.calls[0]?.[0] && (register.mock.calls[0]![0] as { name?: string }).name)).toBe(
-      'handoff',
-    )
+    expect(register.mock.calls[0]?.[0]?.name).toBe('handoff')
   })
 
   it('never throws when a deferred dependency never arrives', () => {

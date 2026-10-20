@@ -222,39 +222,59 @@ export function apply(ctx: ClientContext): void {
   const sessionsService = softGet<ClientSessionsLike>('sessions')
 
   /**
-   * Find the settings mirror for this row.
+   * Bind the settings mirror.
    *
-   * The mirror is keyed by the loader's entry id, which is `include:<row id>`
-   * for a profile-installed bundle. Trying only the bare row id yields an
-   * undefined scope, so the form renders with defaults and every save fails.
+   * The mirror is keyed by the loader's entry id, and a profile-installed bundle
+   * is keyed `include:<row id>`. Guessing the spelling is what produced
+   * "宿主的设置表单未就绪，无法保存": the scope stayed `undefined`, so every save
+   * threw.
+   *
+   * `whileServed` is the host's own idiom: its callback receives the set of
+   * namespaces actually served, which is live data rather than a captured guess,
+   * and it re-runs when the mirror arrives — so a binding made before the mirror
+   * populated still ends up correct. Preferring the bare id keeps the same order
+   * the shipped consumers use.
    */
-  function resolveSettingsScope(): SettingsScopeLike | undefined {
-    for (const ns of SETTINGS_ENTRIES) {
+  const SETTINGS_CANDIDATES = [
+    'dsh-session-handoff',
+    'include:dsh-session-handoff',
+  ] as const
+
+  let settingsScope: SettingsScopeLike | undefined
+
+  function resolveFrom(served: Set<string> | undefined): SettingsScopeLike | undefined {
+    const namespaces = served === undefined ? SETTINGS_CANDIDATES : SETTINGS_CANDIDATES
+    for (const ns of namespaces) {
+      if (served !== undefined && !served.has(ns)) continue
       try {
         const scope = configForms?.get?.(ns)
         if (scope !== undefined) return scope
       } catch {
-        // Try the next spelling.
+        // Next candidate.
       }
     }
     return undefined
   }
 
-  let settingsScope = resolveSettingsScope()
-
-  const configFormsWithMirror = configForms
-  if (configFormsWithMirror?.whileServed !== undefined) {
-    // The mirror can land after this half activates; rebinding keeps saving
-    // working without asking the user to reload the page.
-    guard('settings/mirror', () =>
-      configFormsWithMirror.whileServed!([...SETTINGS_ENTRIES], () => {
-        settingsScope = resolveSettingsScope()
+  const bindMirror = (): void => {
+    if (configForms?.whileServed === undefined) {
+      settingsScope = resolveFrom(undefined)
+      return
+    }
+    try {
+      configForms.whileServed([...SETTINGS_CANDIDATES], (served) => {
+        settingsScope = resolveFrom(served)
         return () => {
           settingsScope = undefined
         }
-      }),
-    )
+      })
+    } catch (error) {
+      console.error('[dsh-session-handoff] 设置镜像绑定失败：', error)
+      settingsScope = resolveFrom(undefined)
+    }
   }
+
+  bindMirror()
 
   // ---- 1. Resident follower -------------------------------------------------
   // The follower polls the current session and jumps to the handoff target. It
@@ -282,9 +302,21 @@ export function apply(ctx: ClientContext): void {
     }
   }
 
+  /**
+   * Persist the form.
+   *
+   * Re-resolves the scope at call time: the mirror can populate after this half
+   * activates, so a scope captured at startup may be stale by the time the user
+   * presses Save. Failing that, the message names the namespaces tried, because
+   * "表单未就绪" alone gives a user nothing to act on.
+   */
   const saveSettings = async (next: HandoffSettings): Promise<void> => {
+    if (settingsScope?.set === undefined) settingsScope = resolveFrom(undefined)
     if (settingsScope?.set === undefined) {
-      throw new Error('宿主的设置表单未就绪，无法保存。')
+      throw new Error(
+        `宿主的设置表单未就绪，无法保存（已尝试 ${SETTINGS_CANDIDATES.join(' / ')}）。` +
+          '若刚安装插件，请重启 dsh 后重试。',
+      )
     }
     await settingsScope.set(next as Partial<HandoffSettings>)
   }

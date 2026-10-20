@@ -345,7 +345,7 @@ export function HandoffCard(props: CardProps): unknown {
     h(Advanced, { settings, patch, disabled }),
 
     // ---- status ------------------------------------------------------------
-    h(StatusPanel, { state, settings }),
+    h(StatusPanel, { state, settings, hasSession: props.sessionId !== undefined }),
 
     // ---- actions -----------------------------------------------------------
     h(
@@ -441,13 +441,26 @@ function Advanced(input: {
 }
 
 /** The live status block: two meters plus the phase line. */
-function StatusPanel(input: { state: HandoffState | undefined; settings: HandoffSettings }): unknown {
+function StatusPanel(input: {
+  state: HandoffState | undefined
+  settings: HandoffSettings
+  hasSession: boolean
+}): unknown {
   const state = input.state
   if (state === undefined) {
+    /*
+     * Distinguish "no conversation to report on" from "the channel is broken".
+     *
+     * The Settings page has no active session of its own, so its status block
+     * legitimately has nothing to show. Saying "状态通道不可用" there reads as a
+     * fault and sends the user looking for a problem that does not exist.
+     */
     return h(
       'div',
-      { style: { color: TOKENS.muted, fontSize: '12px' } },
-      '状态通道不可用（未能读取会话状态）。表单仍可编辑与保存。',
+      { style: { color: TOKENS.muted, fontSize: '12px', lineHeight: 1.5 } },
+      input.hasSession
+        ? '状态通道不可用（未能读取会话状态）。表单仍可编辑与保存。'
+        : '当前没有打开中的会话，因此没有实时占用率可显示。设置以插件配置为准，保存后对所有会话生效。',
     )
   }
 
