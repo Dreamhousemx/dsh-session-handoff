@@ -56,11 +56,53 @@ export const inject = ['slots'] as const
 /** Keyed slot that renders one plugin row's configuration page. */
 export const CARD_SLOT = 'plugins.row.config'
 
-/** Cell key: `<package name>#<row id>`, both equal to this plugin's name. */
+/**
+ * List slot that renders one page in the Settings navigation.
+ *
+ * This is the seat a user expects: Settings → 会话交接, next to General and
+ * Models. The plugin-row cell above is only reachable through a plugin's own
+ * detail page, which is not where someone adjusts a threshold.
+ */
+export const SECTION_SLOT = 'settings.section'
+
+/** Section id; must be unique across the Settings nav. */
+export const SECTION_ID = 'dsh-session-handoff'
+
+/** Position in the nav, after Plugins (15) and before the market (40). */
+export const SECTION_ORDER = 18
+
+/** Nav label. A thunk so a localized string can be swapped without re-registering. */
+export const SECTION_LABEL = (): string => '会话交接'
+
+/**
+ * Cell keys this card answers on.
+ *
+ * A bundle installed into a profile gets the entry id `include:<row id>`; a row
+ * declared directly in a composition keeps `<row id>`. The slot is keyed by
+ * `<package name>#<entry id>`, so both spellings are registered.
+ */
 export const CARD_KEY = 'dsh-session-handoff#dsh-session-handoff'
+
+/** Key used when the loader assigned the row the `include:`-prefixed id. */
+export const BUNDLE_CARD_KEY = 'dsh-session-handoff#include:dsh-session-handoff'
+
+/** Key used when the row id is the bare patch id. */
+export const ROW_CARD_KEY = 'dsh-session-handoff#dsh-session-handoff'
 
 /** Settings namespace: the profile entry id the row established. */
 export const SETTINGS_ENTRY = 'dsh-session-handoff'
+
+/**
+ * Settings namespaces worth probing.
+ *
+ * The settings mirror is keyed by the same entry id as the row, so a bundle
+ * install exposes BOTH `include:dsh-session-handoff` and the bare id depending
+ * on the host build. Reading only one leaves the form permanently empty.
+ */
+export const SETTINGS_ENTRIES = [
+  'include:dsh-session-handoff',
+  'dsh-session-handoff',
+] as const
 
 interface SettingsScopeLike {
   getSnapshot?: () => { value?: Partial<HandoffSettings> }
@@ -179,11 +221,39 @@ export function apply(ctx: ClientContext): void {
   const configForms = softGet<FormsLike>('configForms')
   const sessionsService = softGet<ClientSessionsLike>('sessions')
 
-  let settingsScope: SettingsScopeLike | undefined
-  try {
-    settingsScope = configForms?.get?.(SETTINGS_ENTRY)
-  } catch {
-    settingsScope = undefined
+  /**
+   * Find the settings mirror for this row.
+   *
+   * The mirror is keyed by the loader's entry id, which is `include:<row id>`
+   * for a profile-installed bundle. Trying only the bare row id yields an
+   * undefined scope, so the form renders with defaults and every save fails.
+   */
+  function resolveSettingsScope(): SettingsScopeLike | undefined {
+    for (const ns of SETTINGS_ENTRIES) {
+      try {
+        const scope = configForms?.get?.(ns)
+        if (scope !== undefined) return scope
+      } catch {
+        // Try the next spelling.
+      }
+    }
+    return undefined
+  }
+
+  let settingsScope = resolveSettingsScope()
+
+  const configFormsWithMirror = configForms
+  if (configFormsWithMirror?.whileServed !== undefined) {
+    // The mirror can land after this half activates; rebinding keeps saving
+    // working without asking the user to reload the page.
+    guard('settings/mirror', () =>
+      configFormsWithMirror.whileServed!([...SETTINGS_ENTRIES], () => {
+        settingsScope = resolveSettingsScope()
+        return () => {
+          settingsScope = undefined
+        }
+      }),
+    )
   }
 
   // ---- 1. Resident follower -------------------------------------------------
@@ -219,31 +289,67 @@ export function apply(ctx: ClientContext): void {
     await settingsScope.set(next as Partial<HandoffSettings>)
   }
 
-  const registerCard = (): unknown => {
+  /*
+   * Two seats, deliberately.
+   *
+   * 1. **A settings section** (`settings.section`) — the page this plugin is
+   *    actually about. It appears in the Settings nav beside General, Models,
+   *    Plugins and the rest, which is where a user looks for "how much context
+   *    before handoff". A `plugins.row.config` cell only renders inside a
+   *    plugin's own detail page, several clicks away, so it is not a substitute.
+   * 2. **A row-configuration cell** (`plugins.row.config`) — kept so the row's
+   *    Configure control still opens something. Both entry-id spellings are
+   *    registered: a profile-installed bundle is keyed `include:<row id>` while
+   *    an inline row keeps the bare id.
+   */
+  const cardInject = (): Record<string, unknown> => ({
+    getSettings: readSettings,
+    saveSettings,
+    sessionId: currentSessionId(sessionsForFollow),
+  })
+
+  const registerSection = (): unknown => {
     const slots = runtime.slots
-    if (slots?.register === undefined) {
-      console.warn('[dsh-session-handoff] 宿主没有提供 slots.register，配置卡不可用')
-      return undefined
-    }
+    if (slots?.register === undefined) return undefined
     return slots.register(
       {
-        name: CARD_SLOT,
-        key: CARD_KEY,
-        priority: 30,
-        inject: () => ({
-          getSettings: readSettings,
-          saveSettings,
-          sessionId: currentSessionId(sessionsForFollow),
-        }),
+        name: SECTION_SLOT,
+        id: SECTION_ID,
+        order: SECTION_ORDER,
+        label: SECTION_LABEL,
+        inject: cardInject,
       },
       HandoffCard,
     )
   }
 
+  guard('slots/settings.section', () => {
+    const slots = runtime.slots
+    if (slots?.inject === undefined) return registerSection()
+    return slots.inject(SECTION_SLOT, () => registerSection())
+  })
+
+  const registerCard = (key: string): unknown => {
+    const slots = runtime.slots
+    if (slots?.register === undefined) return undefined
+    return slots.register(
+      {
+        name: CARD_SLOT,
+        key,
+        priority: 30,
+        inject: cardInject,
+      },
+      HandoffCard,
+    )
+  }
+
+  const CARD_KEYS = [BUNDLE_CARD_KEY, ROW_CARD_KEY] as const
+
   guard('slots/plugins.row.config', () => {
     const slots = runtime.slots
-    if (slots?.inject === undefined) return registerCard()
-    return slots.inject(CARD_SLOT, () => registerCard())
+    const registerAll = (): unknown[] => CARD_KEYS.map((key) => registerCard(key))
+    if (slots?.inject === undefined) return registerAll()
+    return slots.inject(CARD_SLOT, () => registerAll())
   })
 
   // ---- 3. Teardown ----------------------------------------------------------

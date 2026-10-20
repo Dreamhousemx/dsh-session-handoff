@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { apply, CARD_KEY, CARD_SLOT, inject, name } from '@src/client/index'
+import { apply, BUNDLE_CARD_KEY, CARD_KEY, CARD_SLOT, inject, name, ROW_CARD_KEY } from '@src/client/index'
 
 /**
  * A Cordis-like Client context.
@@ -40,31 +40,39 @@ describe('client entry', () => {
     expect([...inject]).not.toContain('forms')
   })
 
-  it('uses a stable name and a row-configuration cell key', () => {
+  it('uses a stable name and answers on both entry-id spellings', () => {
     expect(name).toBe('dsh-session-handoff-client')
     expect(CARD_SLOT).toBe('plugins.row.config')
-    expect(CARD_KEY).toBe('dsh-session-handoff#dsh-session-handoff')
+    // A profile-installed bundle is keyed `include:<row id>`; a row declared
+    // inline in a composition keeps the bare id. Registering only one spelling
+    // yields a row that is running but has no Configure control.
+    expect(BUNDLE_CARD_KEY).toBe('dsh-session-handoff#include:dsh-session-handoff')
+    expect(ROW_CARD_KEY).toBe('dsh-session-handoff#dsh-session-handoff')
+    expect(CARD_KEY).toBe(ROW_CARD_KEY)
   })
 
   it('registers the card even when configForms and sessions are absent', () => {
     const fake = fakeClientContext()
     expect(() => apply(fake.ctx as never)).not.toThrow()
 
-    const card = fake.registered.find((entry) => entry.options['key'] === CARD_KEY)
-    expect(card).toBeDefined()
-    expect(card!.slot).toBe(CARD_SLOT)
-    expect(typeof card!.options['inject']).toBe('function')
+    const keys = fake.registered.map((entry) => entry.options['key'])
+    expect(keys).toContain(BUNDLE_CARD_KEY)
+    expect(keys).toContain(ROW_CARD_KEY)
+
+    const card = fake.registered.find((entry) => entry.options['key'] === ROW_CARD_KEY)!
+    expect(card.slot).toBe(CARD_SLOT)
+    expect(typeof card.options['inject']).toBe('function')
   })
 
   it('injects settings access and a session id into the card', () => {
     const scope = { getSnapshot: () => ({ value: { autoHandoffAtContextPercent: 70 } }), set: vi.fn() }
     const fake = fakeClientContext({
-      configForms: { get: (ns: string) => (ns === 'dsh-session-handoff' ? scope : undefined) },
+      configForms: { get: (ns: string) => (ns === 'include:dsh-session-handoff' ? scope : undefined) },
       sessions: { list: { getSnapshot: () => ({ current: 'sess-1' }) } },
     })
     apply(fake.ctx as never)
 
-    const card = fake.registered.find((entry) => entry.options['key'] === CARD_KEY)!
+    const card = fake.registered.find((entry) => entry.options['key'] === ROW_CARD_KEY)!
     const injected = (card.options['inject'] as () => Record<string, unknown>)()
     expect(injected['sessionId']).toBe('sess-1')
     expect(typeof injected['getSettings']).toBe('function')

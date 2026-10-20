@@ -145,6 +145,18 @@ export interface WorkspaceLike {
 
 export interface WorkspaceRegistryLike {
   resolveByPath(path: string): Promise<WorkspaceLike | undefined> | WorkspaceLike | undefined
+  /**
+   * Archive one session, optionally stopping its work.
+   *
+   * With `stopActivity` the durable archive is written first and the stop
+   * providers are asked afterwards, so a wake induced by the stop is already
+   * blocked by the archive set the `agent/pre-step` gate reads. This is the
+   * host's own "stand this session down" primitive; the log is retained.
+   */
+  archiveSession?(
+    sessionId: SessionId,
+    options?: { readonly stopActivity?: boolean },
+  ): Promise<void>
 }
 
 /** `ctx.permissionPresets` — the named permission preset a session runs under. */

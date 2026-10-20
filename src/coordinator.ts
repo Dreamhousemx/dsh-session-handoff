@@ -42,6 +42,14 @@ export interface CoordinatorDeps {
   readonly waitIdle: (agent: AgentLike) => Promise<void>
   /** Deliver a human message that arrived mid-flight to the new session. */
   readonly reroute?: (newSessionId: string, text: string) => Promise<boolean>
+  /**
+   * Stand the source session down once its work has moved.
+   *
+   * Called only after the brief was delivered, so a failure here can never lose
+   * the task. Absent means "leave the old session running", which is the safe
+   * degradation on a host that cannot stop a session.
+   */
+  readonly retire?: (sessionId: string, newSessionId: string | undefined) => Promise<void> | void
   readonly now?: () => number
   readonly log?: (message: string) => void
 }
@@ -284,12 +292,21 @@ export class Coordinator {
       })
     }
 
+    // 5. The new session owns the task; only now is the old one retired.
+    //
+    // The order matters and is deliberate: the brief must be delivered and
+    // accepted BEFORE this session stops, so a failure leaves the work where it
+    // was. Retiring first would mean a delivery failure strands the task in a
+    // session that is already standing down.
     run.phase = 'transferring'
+    const retired = await this.retire(sessionId, migrated.newSessionId)
+
     return this.finish(sessionId, {
       ...migrated,
       phase: 'completed',
       text: [
         `交接完成：新会话 ${migrated.newSessionId ?? '(未知)'} 已接手。`,
+        retired,
         redactions.length === 0
           ? ''
           : `简报中有 ${redactions.length} 类敏感信息已替换为占位符。`,
@@ -298,6 +315,28 @@ export class Coordinator {
         .filter((line) => line.length > 0)
         .join('\n'),
     })
+  }
+
+  /**
+   * Stand the old session down after its work moved.
+   *
+   * This is *not* a cancel: the latch is already held, the step boundary was
+   * already observed, and nothing is in flight. Retiring means the session stops
+   * accepting new turns and is reported as handed over; the log stays intact and
+   * readable, so the user can still scroll back.
+   *
+   * A failure here is reported but does not fail the handoff — the task is
+   * already safe in the new session, and claiming otherwise would be wrong.
+   */
+  private async retire(sessionId: string, newSessionId: string | undefined): Promise<string> {
+    const retire = this.deps.retire
+    if (retire === undefined) return ''
+    try {
+      await retire(sessionId, newSessionId)
+      return '原会话已退役（日志保留，可回看）。'
+    } catch (error) {
+      return `原会话退役失败（不影响新会话）：${messageOf(error)}`
+    }
   }
 
   // ---------------------------------------------------------------- compact

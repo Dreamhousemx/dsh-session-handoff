@@ -323,3 +323,60 @@ describe('automatic action wiring', () => {
     expect(seen).toEqual(['s-auto'])
   })
 })
+
+describe('Coordinator — retirement order', () => {
+  it('retires the source only after the brief was delivered', async () => {
+    const events: string[] = []
+    const d = deps({
+      migrate: async () => {
+        events.push('created+delivered')
+        return success('new-1')
+      },
+      retire: async () => {
+        events.push('retired')
+      },
+    })
+    const coordinator = new Coordinator(d)
+    const result = await coordinator.run(handoff(idleAgent()))
+
+    expect(result.ok).toBe(true)
+    expect(events).toEqual(['created+delivered', 'retired'])
+    expect(result.text).toContain('原会话已退役')
+  })
+
+  it('never retires when the migration failed', async () => {
+    const retire = vi.fn(async () => {})
+    const coordinator = new Coordinator(
+      deps({
+        migrate: async () => ({ ok: false, phase: 'failed', text: '投递失败', error: 'delivery' }),
+        retire,
+      }),
+    )
+    const result = await coordinator.run(handoff(idleAgent()))
+
+    expect(result.ok).toBe(false)
+    expect(retire).not.toHaveBeenCalled()
+  })
+
+  it('reports a retirement failure without failing an otherwise safe handoff', async () => {
+    const coordinator = new Coordinator(
+      deps({
+        retire: async () => {
+          throw new Error('archive unavailable')
+        },
+      }),
+    )
+    const result = await coordinator.run(handoff(idleAgent()))
+
+    expect(result.ok).toBe(true)
+    expect(result.text).toContain('退役失败')
+    expect(result.text).toContain('不影响新会话')
+  })
+
+  it('works with no retire hook at all (host cannot stop a session)', async () => {
+    const coordinator = new Coordinator(deps())
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.ok).toBe(true)
+    expect(result.text).not.toContain('退役')
+  })
+})

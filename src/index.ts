@@ -213,6 +213,32 @@ export function apply(ctx: Context, config: ConfigShape): void {
     waitIdle: async (agent) => {
       if (typeof agent.whenIdle === 'function') await agent.whenIdle()
     },
+    /*
+     * Retire the source session after its work has moved.
+     *
+     * `archiveSession({ stopActivity: true })` is the host's own "stop this
+     * session's work" path: it writes the durable archive first, and only then
+     * asks the stop providers, whose `agent/pre-step` gate reads that archive
+     * set — so every wake the stops induce is already blocked. That ordering is
+     * exactly the "start the new session, then stop the old one" sequence, and
+     * it uses the host's mechanism instead of inventing one.
+     *
+     * The log is retained: archiving hides a session from the active list, it
+     * does not delete history.
+     */
+    retire: async (sessionId, newSessionId) => {
+      const registry = readServices(host).workspaceRegistry
+      if (registry === undefined) {
+        throw new Error('当前部署没有 workspaceRegistry，无法归档旧会话')
+      }
+      if (typeof registry.archiveSession !== 'function') {
+        throw new Error('当前部署的 workspaceRegistry 不支持归档会话')
+      }
+      await registry.archiveSession(sessionId, { stopActivity: true })
+      log(
+        `dsh-session-handoff: 旧会话 ${sessionId} 已归档${newSessionId === undefined ? '' : `（接手：${newSessionId}）`}`,
+      )
+    },
     now: () => Date.now(),
     log,
   })
