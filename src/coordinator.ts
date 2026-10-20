@@ -20,6 +20,7 @@
  *   reports why; the original session is left exactly as it was.
  */
 import type { AgentLike } from './contracts.ts'
+import { PLUGIN_SOURCE_KIND } from './session-migration.ts'
 import { type CompactOutcome } from './compact-handler.ts'
 import {
   type BoundaryOutcome,
@@ -400,10 +401,10 @@ export class Coordinator {
         await agent.followup(
           {
             role: 'user',
-            source: { kind: 'plugin' },
+            source: { kind: PLUGIN_SOURCE_KIND },
             content: [{ type: 'text', text: '继续完成刚才的任务。' }],
           } as never,
-          { source: { kind: 'plugin' } } as never,
+          { source: { kind: PLUGIN_SOURCE_KIND } } as never,
         )
       } catch {
         // The compaction succeeded; failing the whole action over the nudge

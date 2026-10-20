@@ -35,6 +35,17 @@ import type {
 } from './contracts.ts'
 import type { InheritOutcome } from './types.ts'
 
+/**
+ * Producer-owned source kind for messages this plugin injects.
+ *
+ * Session format v4 requires the shape `plugin:<package>`; the bare `'plugin'`
+ * value is rejected outright, and the released V3 wrapper carrying it is
+ * rewritten to exactly this shape on load. Using the bare value delivered the
+ * message and then failed the turn with
+ * "format v4 message requires a producer-owned source kind".
+ */
+export const PLUGIN_SOURCE_KIND = 'plugin:dsh-session-handoff'
+
 /** Everything the migration needs, all of it optional except `create`. */
 export interface MigrationDeps {
   readonly sessionController: SessionControllerLike | undefined
@@ -411,16 +422,21 @@ export async function deliverBrief(
      *
      * `followup` takes a `UserMessage`, whose `content` is a block array. Passing
      * a string made the harness read `content.kind` on a primitive and fail with
-     * "Cannot read properties of undefined (reading 'kind')" — the new session
-     * was created, received nothing, and the error surfaced as a failed task.
+     * "Cannot read properties of undefined (reading 'kind')".
+     *
+     * The source kind must also be producer-owned: session format v4 rejects the
+     * bare `'plugin'` (`format v4 message requires a producer-owned source kind`)
+     * and requires `plugin:<package>`, which is what the released V3 `'plugin'`
+     * wrapper is rewritten into. Using the bare value delivered the message and
+     * then failed the turn.
      */
     await agent.followup(
       {
         role: 'user',
-        source: { kind: 'plugin' },
+        source: { kind: PLUGIN_SOURCE_KIND },
         content: [{ type: 'text', text: brief }],
       } as never,
-      { source: { kind: 'plugin' } } as never,
+      { source: { kind: PLUGIN_SOURCE_KIND } } as never,
     )
     return { delivered: true, outcome: { item: 'brief', status: 'inherited', detail: '已投递' } }
   } catch (error) {

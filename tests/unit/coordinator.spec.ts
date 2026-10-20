@@ -383,3 +383,29 @@ describe('Coordinator — retirement order', () => {
     expect(result.text).not.toContain('退役')
   })
 })
+
+describe('injected message shape', () => {
+  it('uses a producer-owned source kind, never the bare `plugin`', async () => {
+    // Session format v4 rejects `kind: 'plugin'` outright:
+    // "format v4 message requires a producer-owned source kind".
+    // It must be `plugin:<package>`.
+    const followup = vi.fn(async () => {})
+    const agent: AgentLike = { id: 's1', whenIdle: () => Promise.resolve(), followup }
+    const coordinator = new Coordinator(
+      deps({ compact: async () => ({ kind: 'compacted', continuesTask: true }) }),
+    )
+
+    await coordinator.run({
+      sessionId: 's1',
+      agent,
+      kind: 'compact',
+      reason: 'context',
+      automatic: true,
+    })
+
+    const message = (followup.mock.calls[0] as unknown as [{ source: { kind: string }; content: unknown[] }])[0]
+    expect(message.source.kind).not.toBe('plugin')
+    expect(message.source.kind).toMatch(/^plugin:[a-z0-9][a-z0-9._-]*$/)
+    expect(Array.isArray(message.content)).toBe(true)
+  })
+})
