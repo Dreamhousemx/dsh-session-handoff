@@ -6,7 +6,7 @@ import {
   readCumulativeUsage,
   windowFromEvents,
 } from '@src/measure.ts'
-import type { SessionEventLike, SessionLike, TokenMeterLike } from '@src/contracts.ts'
+import { sessionEvents, type SessionEventLike, type SessionLike, type TokenMeterLike } from '@src/contracts.ts'
 
 function session(overrides: Partial<SessionLike> = {}): SessionLike {
   return { id: 's1', ...overrides }
@@ -209,10 +209,30 @@ describe('windowFromEvents', () => {
     // numbers consistent.
     const idle = session({
       requestContext: () => ({}),
-      events: [{ type: 'request/context', seq: 3, data: { contextWindow: 1_000_000 } }],
+      ownEvents: () => [{ type: 'request/context', seq: 3, data: { contextWindow: 1_000_000 } }],
     })
     const result = readContextOccupancy(idle, meter({ surfaceTokens: 470_000 }))
     expect(result.window).toBe(1_000_000)
     expect(percentOf(result)).toBe(47)
+  })
+
+  it('judges a real session with events as non-blank', () => {
+    // The bug this guards: `Session` has no `.events` property, so a session
+    // full of history read as empty and every handoff was refused with
+    // "当前没有可迁移的活动会话".
+    const real = session({
+      ownEvents: () => [
+        { type: 'user/message', seq: 1, data: {} },
+        { type: 'turn/start', seq: 2, data: {} },
+      ],
+    })
+    expect(sessionEvents(real).length).toBe(2)
+  })
+
+  it('falls back to snapshotEvents on a host without ownEvents', () => {
+    const host = session({
+      snapshotEvents: () => [{ type: 'user/message', seq: 1, data: {} }],
+    })
+    expect(sessionEvents(host).length).toBe(1)
   })
 })

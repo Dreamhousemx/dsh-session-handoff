@@ -11,9 +11,8 @@
  * Neither function throws: measurement happens on the event hot path, and a
  * service that misbehaves must degrade the trigger, not the session.
  */
+import { sessionEvents, type SessionEventLike, type SessionLike } from './contracts.ts'
 import type {
-  SessionEventLike,
-  SessionLike,
   SessionProjectionsLike,
   TokenMeterLike,
 } from './contracts.ts'
@@ -100,7 +99,7 @@ export function readContextOccupancy(
    * percentage — two numbers disagreeing about the same session.
    */
   if (window === undefined) {
-    window = windowFromEvents(session.events)
+    window = windowFromEvents(sessionEvents(session))
   }
 
   // A window of zero or a negative value is a broken report, not a full context.

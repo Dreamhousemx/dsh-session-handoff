@@ -62,7 +62,7 @@ import {
   sessionIdFromUrl,
   statePayload,
 } from './routes.ts'
-import type { AgentLike, LlmLike, SessionLike } from './contracts.ts'
+import { sessionEvents, type AgentLike, type LlmLike, type SessionLike } from './contracts.ts'
 import type { ActionResult } from './types.ts'
 import { AsyncLocalStorage } from 'node:async_hooks'
 
@@ -149,7 +149,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   ): Promise<{ brief: string; redactions: readonly string[] }> => {
     const services = readServices(host)
     const session = agent.session
-    const events = session?.events
+    const events = sessionEvents(session)
 
     let facts: SessionFacts = readSessionFacts({
       session,
@@ -245,7 +245,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
   coordinator.activityCheck = (sessionId: string) => {
     const session = sessionOf(sessionId)
-    const events = session?.events ?? []
+    const events = sessionEvents(session)
     // A session is worth handing over once it has either a human message or a
     // completed turn; an untouched new session has neither.
     return events.some((event) => event.type === 'user/message' || event.type === 'turn/start')

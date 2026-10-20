@@ -59,10 +59,43 @@ export interface SessionLike {
   requestContext?(): RequestContextLike | undefined
   /** The latest frozen call configuration. */
   requestHeader?(): { config?: { provider?: string; model?: string } } | undefined
-  /** The durable event log, oldest first. */
-  readonly events?: readonly SessionEventLike[]
+  /**
+   * The session's own committed events, oldest first.
+   *
+   * `Session` does NOT expose an `events` property — an earlier version of this
+   * plugin assumed one, read `undefined`, and therefore judged every session to
+   * be blank, refusing every handoff with "当前没有可迁移的活动会话". The real
+   * accessors are `ownEvents()` and `snapshotEvents(from, to)`.
+   */
+  ownEvents?(): readonly SessionEventLike[]
+  /** A slice of the log; used when `ownEvents` is unavailable. */
+  snapshotEvents?(fromSeq?: number, toSeqExclusive?: number): readonly SessionEventLike[]
   /** The current model-visible surface (a list of seq numbers). */
   readonly surface?: { readonly nodes?: readonly number[] }
+}
+
+/**
+ * The durable events of one session, whichever accessor this host build has.
+ *
+ * Kept in one place so "how do I read the log" has a single answer rather than
+ * three subtly different guesses.
+ */
+export function sessionEvents(session: SessionLike | undefined): readonly SessionEventLike[] {
+  if (session === undefined) return []
+  try {
+    if (typeof session.ownEvents === 'function') {
+      const events = session.ownEvents()
+      if (Array.isArray(events)) return events
+    }
+    if (typeof session.snapshotEvents === 'function') {
+      const events = session.snapshotEvents()
+      if (Array.isArray(events)) return events
+    }
+  } catch {
+    // A log that cannot be read is treated as empty, which the callers report
+    // as "blank session" rather than as a crash.
+  }
+  return []
 }
 
 /** Immutable session metadata inherited across a handoff. */
