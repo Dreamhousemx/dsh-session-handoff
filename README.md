@@ -101,7 +101,7 @@ dsh plugin --profile <profile> add "file:D:/path/to/dsh-session-handoff"
 | 项 | 证据 |
 | --- | --- |
 | 类型检查 | 宿主 + 浏览器两份 tsconfig 均无错误 |
-| 单元测试 | **131 个用例全绿**（度量、触发、软终止、简报、迁移、压缩、协调器、命令、follower、契约形状、客户端激活） |
+| 单元测试 | **164 个用例全绿**（度量、触发、软终止、简报、迁移、压缩、协调器、命令、follower、契约形状、客户端激活） |
 | 构建产物 | Host ESM `lib/index.js` + Client `lib/client.js`，客户端只 `require("react")`，信封为 `window.__ModuleLoader__.load` |
 | **在真实镜像里激活（宿主）** | 独立 profile 跑 `dsh headless`，**无 "did not activate" 警告**（最小组合与完整 profile 都验过） |
 | **配置 schema 可被宿主投影** | `cordis_inspect` 返回 `status: "schema"`，14 个字段的默认值与范围完整；`limitations: []` |
@@ -110,8 +110,19 @@ dsh plugin --profile <profile> add "file:D:/path/to/dsh-session-handoff"
 | **命令真实返回** | `/handoff bogus` 走真实 handler，返回 `{"kind":"error","text":"未知子命令「bogus」…"}` |
 | **配置卡注册** | 驱动安装的 `lib/client.js`：`plugins.row.config` / `dsh-session-handoff#dsh-session-handoff` 注册成功，注入 `getSettings`/`saveSettings`/`sessionId` |
 | **客户端只声明 `slots`** | `inject: ["slots"]`，不再等待不存在的服务 |
+| **状态路由在活实例上真实响应** | 桌面端 `GET /dsh-session-handoff/state?sessionId=…` 返回完整快照，字段与 `protocol.ts` 的 `HandoffState` 逐项同形；`occupancy.quality: "exact"`、`persistence: "durable"` |
+| **读配置路由返回已存值** | `GET /dsh-session-handoff/config` 在 profile 存 40% 时返回 `40`，**不是代码默认的 85** —— 正是「卡片显示 85% 说明读失败」那条判别信号的反向证据 |
+| **写配置往返打通** | POST 40→45：`cordis.patch.yml` 落盘 `45`，`/config` 读回 `45`；再写回 40，文件与测试前**逐字节一致**（幂等、无副作用） |
+| **越权输入被拒** | 缺 `sessionId` → `400 {"ok":false,"error":"缺少 sessionId"}`；未知动作 → `{"ok":false,"error":"未知操作"}` |
 
-需要在浏览器中人工确认：配置卡的**视觉渲染**、一次真实的完整交接（换会话）。这两项必须在真正的 Web 页面里看，命令行无法代劳。
+需要在浏览器中人工确认的两项，步骤与逐项期望值见
+[`docs/web-acceptance-checklist.md`](docs/web-acceptance-checklist.md)：
+配置卡的**视觉渲染**、一次真实的**完整交接**（换会话）。
+
+> 2026-10-20 21:5x 补充：`renderStatus` 与 `/handoff` 命令族此前**没有测试覆盖**
+> （只测了 `parseCommandArgs`），`/handoff status` 的实际文本全靠人读源码。现补
+> `tests/unit/command.spec.ts`（13 例），把子命令表、三种继承标签、以及「窗口缺失时
+> 明说未知而不是印 0%」钉住，测试总数 151 → 164。
 
 ### 五条实测出来的关键契约（都已修正）
 
