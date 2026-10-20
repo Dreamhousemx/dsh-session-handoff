@@ -31,7 +31,7 @@ import type {} from '@deepseek-ai/dsh-client-ui-renderer/client'
 import type {} from '@deepseek-ai/dsh-client-locale/client'
 import { HandoffCard, type CardProps } from './card'
 import { HandoffFollower, type SessionsLike } from './follow'
-import type { HandoffSettings } from './protocol'
+import { DEFAULT_SETTINGS, type HandoffSettings } from './protocol'
 
 /** Stable browser-plugin name; equals the package name in package.json. */
 export const name = 'dsh-session-handoff-client'
@@ -292,11 +292,27 @@ export function apply(ctx: ClientContext): void {
   void sessionsService
 
   // ---- 2. Configuration card ------------------------------------------------
-  const readSettings = (): HandoffSettings | undefined => {
+  /**
+   * Read the persisted configuration.
+   *
+   * The browser settings mirror is not reachable from this bundle, so reading
+   * it returned `undefined` and the form fell back to defaults — which is why
+   * the page kept showing 85% after 40% had been saved (the save itself worked;
+   * the row in `cordis.patch.yml` held 40). Reads now use the plugin's own Host
+   * route, the same place writes go.
+   *
+   * Returns `undefined` when the route is unavailable, so the caller keeps its
+   * defaults rather than inventing values.
+   */
+  const readSettings = async (): Promise<HandoffSettings | undefined> => {
     try {
-      const snapshot = settingsScope?.getSnapshot?.()
-      const value = snapshot?.value
-      return value === undefined ? undefined : (value as HandoffSettings)
+      const response = await fetch('/dsh-session-handoff/config', {
+        headers: { accept: 'application/json' },
+      })
+      if (!response.ok) return undefined
+      const payload = (await response.json()) as { ok?: boolean; settings?: Partial<HandoffSettings> }
+      if (payload.ok !== true || payload.settings === undefined) return undefined
+      return { ...DEFAULT_SETTINGS, ...payload.settings }
     } catch {
       return undefined
     }
@@ -343,7 +359,14 @@ export function apply(ctx: ClientContext): void {
   const cardInject = (): Record<string, unknown> => ({
     getSettings: readSettings,
     saveSettings,
-    sessionId: currentSessionId(sessionsForFollow),
+    /*
+     * Resolved lazily by the card, not captured here.
+     *
+     * `inject` runs once at registration, when the session list may still be
+     * empty; capturing `current` then pins the card to "no session" forever.
+     * A getter lets each render ask the live snapshot instead.
+     */
+    getSessionId: () => currentSessionId(sessionsForFollow),
   })
 
   const registerSection = (): unknown => {

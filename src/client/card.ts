@@ -53,8 +53,10 @@ export interface CardProps {
   readonly view?: 'summary' | 'page' | undefined
   /** Session the card reports on; absent when no conversation is open. */
   readonly sessionId?: string | undefined
-  /** Read the current form values from the host settings scope. */
-  readonly getSettings?: (() => HandoffSettings | undefined) | undefined
+  /** Live session id getter; preferred over the captured prop. */
+  readonly getSessionId?: (() => string | undefined) | undefined
+  /** Read the persisted configuration; async because it comes from the Host. */
+  readonly getSettings?: (() => HandoffSettings | undefined | Promise<HandoffSettings | undefined>) | undefined
   /** Persist a complete form value set. */
   readonly saveSettings?: ((next: HandoffSettings) => Promise<void> | void) | undefined
   /** Base origin for the status routes; defaults to the current origin. */
@@ -83,9 +85,19 @@ export function HandoffCard(props: CardProps): unknown {
   const [loaded, setLoaded] = useState(false)
   const [saving, setSaving] = useState(false)
   const [saveError, setSaveError] = useState<string | undefined>(undefined)
+  const [loadError, setLoadError] = useState<string | undefined>(undefined)
   const [busyAction, setBusyAction] = useState<string | undefined>(undefined)
 
   const getSettings = props.getSettings
+
+  /**
+   * The session actions apply to.
+   *
+   * The injected `sessionId` is a snapshot from registration time; on a page
+   * opened before any conversation it is permanently undefined. The getter is
+   * live, so the buttons enable as soon as a session exists.
+   */
+  const liveSessionId = (): string | undefined => props.getSessionId?.() ?? props.sessionId
   const saveSettingsProp = props.saveSettings
 
   // The row's summary view is a single line; it has no state to manage.
@@ -93,16 +105,25 @@ export function HandoffCard(props: CardProps): unknown {
     return h('span', { style: { color: TOKENS.muted, fontSize: '12.5px' } }, CARD_SUMMARY)
   }
 
-  // Load persisted values once. The host's settings scope is a snapshot, so
-  // this runs synchronously; the async shape is kept for older scopes.
+  // Load persisted values once.
+  //
+  // A failed read must not be silent: falling back to defaults looks exactly
+  // like "the user's saved value was ignored", which is the bug this replaced.
   useEffect(() => {
     let alive = true
     void Promise.resolve()
       .then(() => getSettings?.())
       .then((value) => {
-        if (alive && value !== undefined) setSettings({ ...DEFAULT_SETTINGS, ...value })
+        if (!alive) return
+        if (value === undefined) {
+          setLoadError('未能读取已保存的配置，下面显示的是默认值。保存会覆盖为当前表单内容。')
+          return
+        }
+        setSettings({ ...DEFAULT_SETTINGS, ...value })
       })
-      .catch(() => {})
+      .catch((error: unknown) => {
+        if (alive) setLoadError(error instanceof Error ? error.message : String(error))
+      })
       .finally(() => {
         if (alive) setLoaded(true)
       })
@@ -113,7 +134,7 @@ export function HandoffCard(props: CardProps): unknown {
 
   // Poll the status channel while the card is mounted.
   useEffect(() => {
-    const sessionId = props.sessionId
+    const sessionId = liveSessionId()
     if (sessionId === undefined) return
     let alive = true
     let timer: ReturnType<typeof setTimeout> | undefined
@@ -141,7 +162,7 @@ export function HandoffCard(props: CardProps): unknown {
       alive = false
       if (timer !== undefined) clearTimeout(timer)
     }
-  }, [props.sessionId, props.origin])
+  }, [liveSessionId(), props.origin])
 
   const patch = useCallback((next: Partial<HandoffSettings>) => {
     setSettings((current) => ({ ...current, ...next }))
@@ -172,7 +193,7 @@ export function HandoffCard(props: CardProps): unknown {
 
   const act = useCallback(
     async (action: 'handoff' | 'cancel' | 'retry') => {
-      const sessionId = props.sessionId
+      const sessionId = liveSessionId()
       if (sessionId === undefined) return
       setBusyAction(action)
       try {
@@ -193,7 +214,7 @@ export function HandoffCard(props: CardProps): unknown {
         setBusyAction(undefined)
       }
     },
-    [props.origin, props.sessionId],
+    [props.origin, liveSessionId()],
   )
 
   const percent = settings.autoHandoffAtContextPercent
@@ -345,16 +366,16 @@ export function HandoffCard(props: CardProps): unknown {
     h(Advanced, { settings, patch, disabled }),
 
     // ---- status ------------------------------------------------------------
-    h(StatusPanel, { state, settings, hasSession: props.sessionId !== undefined }),
+    h(StatusPanel, { state, settings, hasSession: liveSessionId() !== undefined }),
 
     // ---- actions -----------------------------------------------------------
     h(
       'div',
       { style: { display: 'flex', gap: '8px', flexWrap: 'wrap', alignItems: 'center' } },
       [
-        button('立即迁移', () => void act('handoff'), busyAction === 'handoff' || props.sessionId === undefined),
-        button('取消', () => void act('cancel'), busyAction === 'cancel' || props.sessionId === undefined),
-        button('重试', () => void act('retry'), busyAction === 'retry' || props.sessionId === undefined),
+        button('立即迁移', () => void act('handoff'), busyAction === 'handoff' || liveSessionId() === undefined),
+        button('取消', () => void act('cancel'), busyAction === 'cancel' || liveSessionId() === undefined),
+        button('重试', () => void act('retry'), busyAction === 'retry' || liveSessionId() === undefined),
         h('span', { key: 'spacer', style: { flex: '1' } }),
         button('保存设置', () => void save(), disabled || blocking !== undefined, true),
       ],
@@ -363,6 +384,7 @@ export function HandoffCard(props: CardProps): unknown {
     // ---- messages ----------------------------------------------------------
     blocking === undefined ? null : notice(blocking, 'danger'),
     saveError === undefined ? null : notice(saveError, 'danger'),
+    loadError === undefined ? null : notice(loadError, 'warn'),
     ...warnings.map((warning) => notice(warning, 'warn')),
     /*
      * Only warn about a missing window when there is a live session to warn

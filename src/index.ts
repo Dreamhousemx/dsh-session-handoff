@@ -463,6 +463,21 @@ export function apply(ctx: Context, config: ConfigShape): void {
         const loopback = isLoopbackRequest(req.socket?.remoteAddress)
 
         try {
+          /*
+           * Read the row's current configuration.
+           *
+           * The Configuration page needs the persisted values, not the
+           * defaults: the browser mirror is unavailable to this bundle, so
+           * reading through it silently produced defaults and the page kept
+           * showing 85% after the user had saved 40%. This is the read half of
+           * the save route below, and both use `live`, which is the value the
+           * Loader actually applied.
+           */
+          if (action === 'config' && (req.method ?? 'GET') === 'GET') {
+            sendJson(res, 200, { ok: true, settings: live })
+            return
+          }
+
           if (action === 'state' && (req.method ?? 'GET') === 'GET') {
             const sessionId = sessionIdFromUrl(req.url)
             if (sessionId === undefined) {

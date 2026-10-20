@@ -64,21 +64,63 @@ describe('client entry', () => {
     expect(typeof card.options['inject']).toBe('function')
   })
 
-  it('injects settings access and a session id into the card', () => {
-    const scope = { getSnapshot: () => ({ value: { autoHandoffAtContextPercent: 70 } }), set: vi.fn() }
+  it('injects a session id and a Host-backed settings reader', async () => {
+    // Reads go through the plugin's own route now: the browser settings mirror
+    // is not reachable from a static bundle, and reading it silently returned
+    // defaults — the page kept showing 85% after 40% had been saved.
+    const requested: string[] = []
     const fake = fakeClientContext({
-      configForms: { get: (ns: string) => (ns === 'include:dsh-session-handoff' ? scope : undefined) },
       sessions: { list: { getSnapshot: () => ({ current: 'sess-1' }) } },
     })
-    apply(fake.ctx as never)
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (url: string) => {
+      requested.push(String(url))
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ ok: true, settings: { autoHandoffAtContextPercent: 40 } }),
+      }
+    }) as unknown as typeof fetch
 
-    const card = fake.registered.find((entry) => entry.options['key'] === ROW_CARD_KEY)!
-    const injected = (card.options['inject'] as () => Record<string, unknown>)()
-    expect(injected['sessionId']).toBe('sess-1')
-    expect(typeof injected['getSettings']).toBe('function')
-    expect((injected['getSettings'] as () => { autoHandoffAtContextPercent: number })()).toMatchObject({
-      autoHandoffAtContextPercent: 70,
-    })
+    try {
+      apply(fake.ctx as never)
+      const card = fake.registered.find((entry) => entry.options['key'] === ROW_CARD_KEY)!
+      const injected = (card.options['inject'] as () => Record<string, unknown>)()
+      expect((injected['getSessionId'] as () => string | undefined)()).toBe('sess-1')
+
+      const settings = await (injected['getSettings'] as () => Promise<{
+        autoHandoffAtContextPercent: number
+      }>)()
+      expect(settings.autoHandoffAtContextPercent).toBe(40)
+      expect(requested.some((url) => url.includes('/dsh-session-handoff/config'))).toBe(true)
+    } finally {
+      globalThis.fetch = originalFetch
+    }
+  })
+
+  it('posts saves to the Host route instead of a browser scope', async () => {
+    const calls: Array<{ url: string; body: unknown }> = []
+    const fake = fakeClientContext({})
+    const originalFetch = globalThis.fetch
+    globalThis.fetch = (async (url: string, init?: { body?: string }) => {
+      calls.push({ url: String(url), body: JSON.parse(String(init?.body ?? '{}')) })
+      return { ok: true, status: 200, json: async () => ({ ok: true }) }
+    }) as unknown as typeof fetch
+
+    try {
+      apply(fake.ctx as never)
+      const section = fake.registered.find((entry) => entry.options['name'] === 'settings.section')!
+      const injected = (section.options['inject'] as () => Record<string, unknown>)()
+      await (injected['saveSettings'] as (next: unknown) => Promise<void>)({
+        autoHandoffAtContextPercent: 40,
+      })
+
+      expect(calls).toHaveLength(1)
+      expect(calls[0]!.url).toContain('/dsh-session-handoff/settings')
+      expect(calls[0]!.body).toMatchObject({ settings: { autoHandoffAtContextPercent: 40 } })
+    } finally {
+      globalThis.fetch = originalFetch
+    }
   })
 
   it('never throws when the slot registry rejects the registration', () => {
