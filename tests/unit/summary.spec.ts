@@ -11,6 +11,7 @@ import {
   sectionCoverage,
   type SessionFacts,
 } from '@src/session-summary.ts'
+import { requestNarrative } from '@src/index.ts'
 
 describe('redact', () => {
   it('removes provider tokens', () => {
@@ -211,5 +212,59 @@ describe('factsFromLog', () => {
     expect(facts.cumulative.tokens).toBe(15)
     expect(facts.turnCount).toBe(1)
     expect(facts.occupancy.percent).toBeUndefined()
+  })
+})
+
+describe('requestNarrative (llm.stream)', () => {
+  async function* chunks(items: unknown[]) {
+    for (const item of items) yield item
+  }
+
+  it('concatenates text deltas into the nine sections', async () => {
+    const llm = {
+      stream: () =>
+        chunks([
+          { type: 'text-delta', text: '## 总体目标\n做插件\n' },
+          { type: 'text-delta', text: '## 下一步\n跑测试' },
+          { type: 'finish', reason: { kind: 'stop' } },
+        ]),
+    }
+    const narrative = await requestNarrative(llm as never, 'p', 100, {
+      provider: 'deepseek',
+      model: 'deepseek-chat',
+    })
+    expect(narrative.goal).toBe('做插件')
+    expect(narrative.next).toBe('跑测试')
+  })
+
+  it('requires an explicit provider and model on the request', async () => {
+    let seen: Record<string, unknown> | undefined
+    const llm = {
+      stream: (options: Record<string, unknown>) => {
+        seen = options
+        return chunks([{ type: 'text-delta', text: 'x' }])
+      },
+    }
+    await requestNarrative(llm as never, 'p', 777, { provider: 'p1', model: 'm1' })
+    expect(seen).toMatchObject({ provider: 'p1', model: 'm1', maxTokens: 777 })
+  })
+
+  it('turns a failed finish chunk into a thrown error', async () => {
+    const llm = {
+      stream: () =>
+        chunks([
+          { type: 'text-delta', text: 'partial' },
+          { type: 'finish', reason: { kind: 'error', failure: { message: 'quota exceeded' } } },
+        ]),
+    }
+    await expect(
+      requestNarrative(llm as never, 'p', 100, { provider: 'a', model: 'b' }),
+    ).rejects.toThrow('quota exceeded')
+  })
+
+  it('fails clearly when the service has no stream method', async () => {
+    await expect(
+      requestNarrative({} as never, 'p', 100, { provider: 'a', model: 'b' }),
+    ).rejects.toThrow('没有 stream 方法')
   })
 })

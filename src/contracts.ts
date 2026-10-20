@@ -230,9 +230,39 @@ export interface CompactionLike {
   ): Promise<{ kind?: string } | null>
 }
 
-/** `ctx.llm` — the only way this plugin generates text. */
+/**
+ * `ctx.llm` — the only way this plugin generates text.
+ *
+ * There is no `generate`: the service streams. A one-shot call is `stream()`
+ * with a fully specified `GenerateOptions`, and `provider` + `model` are
+ * REQUIRED — the service does not pick a default route for you.
+ */
+export interface LlmStreamOptionsLike {
+  provider: string
+  model: string
+  messages: readonly unknown[]
+  maxTokens?: number
+  system?: string
+  temperature?: number
+  signal?: AbortSignal
+  sessionId?: string
+  /** Closed union on this build: only the harness' own two purposes. */
+  purpose?: 'compaction' | 'session-title'
+}
+
+/** One raw stream chunk. Only the text-bearing shapes matter here. */
+export interface LlmStreamChunkLike {
+  readonly type?: string
+  readonly text?: string
+}
+
 export interface LlmLike {
-  generate?(options: unknown): Promise<unknown> | AsyncIterable<unknown>
+  stream?(options: LlmStreamOptionsLike): AsyncIterable<LlmStreamChunkLike>
+  /** Validate a route and materialize adapter defaults; optional. */
+  resolveCallConfig?(config: { provider: string; model: string; maxTokens?: number }): Promise<{
+    provider: string
+    model: string
+  }>
 }
 
 /**

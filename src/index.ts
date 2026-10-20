@@ -163,7 +163,26 @@ export function apply(ctx: Context, config: ConfigShape): void {
       throw new Error('当前部署没有 llm 服务，无法生成交接简报')
     }
 
-    const narrative = await requestNarrative(services.llm, buildSummaryPrompt(facts), live.summaryMaxTokens)
+    /*
+     * The summarising call must name a route.
+     *
+     * `llm.stream` does not choose a default provider or model; they are
+     * required fields. The outgoing session's own route is the right one — the
+     * model that did the work is the one that can describe it — and it is read
+     * from the same facts the brief reports, with the deployment default as a
+     * fallback when the session never recorded a request.
+     */
+    const route = summaryRoute(facts, services)
+    if (route === undefined) {
+      throw new Error('原会话没有记录模型路由，也没有部署默认模型，无法生成交接简报')
+    }
+
+    const narrative = await requestNarrative(
+      services.llm,
+      buildSummaryPrompt(facts),
+      live.summaryMaxTokens,
+      route,
+    )
 
     if (!narrativeIsUsable(narrative)) {
       throw new Error('模型返回的简报内容不足（可用小节少于 3 段），已放弃本次交接')
@@ -700,58 +719,68 @@ function safely<T>(read: () => T | undefined): T | undefined {
 /**
  * Ask the model for the nine sections.
  *
- * The call passes no `purpose`: the host's option union is closed and adding a
- * value would be a type error against the installed declarations. The prompt
- * carries the structure instead.
+ * `llm.stream` rather than a `generate` helper: the service exposes only the
+ * streaming API, and it requires an explicit provider/model route. The prompt
+ * carries the section structure, and no `purpose` is passed — that union is
+ * closed on this build and only accepts the harness' own two values.
  */
 export async function requestNarrative(
   llm: LlmLike,
   prompt: string,
   maxTokens: number,
+  route: { provider: string; model: string },
 ): Promise<BriefNarrative> {
-  const generate = llm.generate
-  if (typeof generate !== 'function') {
-    throw new Error('当前 llm 服务没有 generate 方法')
+  const stream = llm.stream
+  if (typeof stream !== 'function') {
+    throw new Error('当前 llm 服务没有 stream 方法，无法生成交接简报')
   }
-  const output = await generate({
+
+  const chunks = stream.call(llm, {
+    provider: route.provider,
+    model: route.model,
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     maxTokens,
   })
-  return parseNarrative(await collectText(output))
-}
 
-/** Flatten whatever the generation call returned into text. */
-async function collectText(output: unknown): Promise<string> {
-  if (typeof output === 'string') return output
-  if (output === null || output === undefined) return ''
-
-  // An async iterable of chunks.
-  if (typeof (output as AsyncIterable<unknown>)[Symbol.asyncIterator] === 'function') {
-    let text = ''
-    for await (const chunk of output as AsyncIterable<unknown>) text += chunkText(chunk)
-    return text
-  }
-  return chunkText(output)
-}
-
-function chunkText(chunk: unknown): string {
-  if (typeof chunk === 'string') return chunk
-  if (chunk === null || typeof chunk !== 'object') return ''
-  const record = chunk as Record<string, unknown>
-  if (typeof record['text'] === 'string') return record['text']
-  if (record['type'] === 'text-delta' && typeof record['text'] === 'string') return record['text']
-  if (record['message'] !== undefined) {
-    const message = record['message'] as Record<string, unknown>
-    const content = message['content']
-    if (Array.isArray(content)) {
-      return content
-        .map((part) => (part as Record<string, unknown>)['text'])
-        .filter((value): value is string => typeof value === 'string')
-        .join('')
+  let text = ''
+  let failure: string | undefined
+  for await (const chunk of chunks) {
+    if (chunk.type === 'text-delta' && typeof chunk.text === 'string') {
+      text += chunk.text
+      continue
     }
-    if (typeof message['text'] === 'string') return message['text']
+    if (chunk.type === 'finish') {
+      const reason = (chunk as { reason?: { kind?: string; failure?: { message?: string } } }).reason
+      if (reason?.kind === 'error' || reason?.kind === 'aborted') {
+        failure = reason.failure?.message ?? reason.kind
+      }
+    }
   }
-  return ''
+
+  if (failure !== undefined) throw new Error(`模型调用失败：${failure}`)
+  return parseNarrative(text)
+}
+
+/**
+ * The route used to summarize.
+ *
+ * Prefers the session's own provider/model — the model that did the work is the
+ * one that can describe it — and falls back to the deployment default when the
+ * session never recorded a request.
+ */
+function summaryRoute(
+  facts: SessionFacts,
+  services: ReturnType<typeof readServices>,
+): { provider: string; model: string } | undefined {
+  if (facts.provider !== undefined && facts.model !== undefined) {
+    return { provider: facts.provider, model: facts.model }
+  }
+  try {
+    const fallback = services.agentDefaultModel?.currentSelection()
+    return fallback === undefined ? undefined : { provider: fallback.provider, model: fallback.model }
+  } catch {
+    return undefined
+  }
 }
 
 void factsFromLog

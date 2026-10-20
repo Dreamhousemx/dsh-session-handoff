@@ -68,9 +68,41 @@ declare const CONFIG_DEFAULTS: Config;
 declare function withDefaults(config: Partial<Config> | undefined): Config;
 //#endregion
 //#region src/contracts.d.ts
-/** `ctx.llm` — the only way this plugin generates text. */
+/**
+ * `ctx.llm` — the only way this plugin generates text.
+ *
+ * There is no `generate`: the service streams. A one-shot call is `stream()`
+ * with a fully specified `GenerateOptions`, and `provider` + `model` are
+ * REQUIRED — the service does not pick a default route for you.
+ */
+interface LlmStreamOptionsLike {
+  provider: string;
+  model: string;
+  messages: readonly unknown[];
+  maxTokens?: number;
+  system?: string;
+  temperature?: number;
+  signal?: AbortSignal;
+  sessionId?: string;
+  /** Closed union on this build: only the harness' own two purposes. */
+  purpose?: 'compaction' | 'session-title';
+}
+/** One raw stream chunk. Only the text-bearing shapes matter here. */
+interface LlmStreamChunkLike {
+  readonly type?: string;
+  readonly text?: string;
+}
 interface LlmLike {
-  generate?(options: unknown): Promise<unknown> | AsyncIterable<unknown>;
+  stream?(options: LlmStreamOptionsLike): AsyncIterable<LlmStreamChunkLike>;
+  /** Validate a route and materialize adapter defaults; optional. */
+  resolveCallConfig?(config: {
+    provider: string;
+    model: string;
+    maxTokens?: number;
+  }): Promise<{
+    provider: string;
+    model: string;
+  }>;
 }
 //#endregion
 //#region src/session-summary.d.ts
@@ -100,10 +132,14 @@ declare function apply(ctx: Context, config: Config): void;
 /**
  * Ask the model for the nine sections.
  *
- * The call passes no `purpose`: the host's option union is closed and adding a
- * value would be a type error against the installed declarations. The prompt
- * carries the structure instead.
+ * `llm.stream` rather than a `generate` helper: the service exposes only the
+ * streaming API, and it requires an explicit provider/model route. The prompt
+ * carries the section structure, and no `purpose` is passed — that union is
+ * closed on this build and only accepts the harness' own two values.
  */
-declare function requestNarrative(llm: LlmLike, prompt: string, maxTokens: number): Promise<BriefNarrative>;
+declare function requestNarrative(llm: LlmLike, prompt: string, maxTokens: number, route: {
+  provider: string;
+  model: string;
+}): Promise<BriefNarrative>;
 //#endregion
 export { CONFIG_DEFAULTS, Config, ROUTE_PREFIX, SETTINGS_ENTRY, apply, inject, name, requestNarrative, withDefaults };
