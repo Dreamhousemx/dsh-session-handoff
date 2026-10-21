@@ -66,6 +66,8 @@ export interface SourceSnapshot {
   readonly agentPreset: string | undefined
   readonly model: { provider: string; model: string } | undefined
   readonly permissionPreset: string | undefined
+  /** Why the permission preset could not be read, when it could not. */
+  readonly permissionPresetError?: string
   readonly approvalPolicy: unknown
   readonly planMode: { readonly active: boolean } | undefined
 }
@@ -110,7 +112,19 @@ export function snapshotSource(source: {
       ? { provider, model }
       : source.defaultModel
 
-  const permissionPreset = safely(() => source.permissionPresets?.current(source.session!))
+  /*
+   * `permissionPresets.current` takes the real `Session` instance and reads its
+   * log through `snapshotEvents`. Handing it anything else throws
+   * "snapshotEvents is not a function", which `safely` then swallowed into an
+   * undefined preset — the handoff reported "权限：回退" on every single run with
+   * no way to tell why.
+   *
+   * So the failure is captured, not hidden: the caller can report the reason,
+   * and an object that looks like a session but cannot answer is distinguishable
+   * from a deployment that has no presets at all.
+   */
+  const permissionRead = readPermissionPreset(source.session, source.permissionPresets)
+  const permissionPreset = permissionRead.value
   const approvalPolicy = safely(() => source.approval?.overrideOf(source.session!))
 
   const planMode = safely(() => planModeFor(source.agent, source.agentPresets))
@@ -121,8 +135,47 @@ export function snapshotSource(source: {
     agentPreset: header?.agentPreset,
     model: modelSelection,
     permissionPreset,
+    ...(permissionRead.error === undefined ? {} : { permissionPresetError: permissionRead.error }),
     approvalPolicy,
     planMode,
+  }
+}
+
+/** The outcome of reading a session's permission preset. */
+export interface PermissionRead {
+  readonly value: string | undefined
+  /** Why it could not be read, when it could not. */
+  readonly error?: string
+}
+
+/**
+ * Read the effective permission preset, keeping the failure reason.
+ *
+ * `permissionPresets.current` walks the session log (`snapshotEvents`), so it
+ * needs the host's own `Session` instance. When the plugin is handed a different
+ * object it throws a message about `snapshotEvents`, and collapsing that into
+ * "no preset" hides a real defect behind an innocent-looking fallback — which is
+ * exactly how this bug survived several handoffs reported as successful.
+ */
+export function readPermissionPreset(
+  session: { snapshotEvents?: unknown } | undefined,
+  presets: PermissionPresetsLike | undefined,
+): PermissionRead {
+  if (presets === undefined) return { value: undefined, error: '部署未提供 permissionPresets 服务' }
+  if (session === undefined) return { value: undefined, error: '找不到原会话对象' }
+  if (typeof session.snapshotEvents !== 'function') {
+    return {
+      value: undefined,
+      error: '传入的对象不是宿主 Session 实例（缺少 snapshotEvents）',
+    }
+  }
+  try {
+    return { value: presets.current(session as never) }
+  } catch (error) {
+    return {
+      value: undefined,
+      error: error instanceof Error ? error.message : String(error),
+    }
   }
 }
 
@@ -309,6 +362,21 @@ async function inheritPermission(
   const presets = deps.permissionPresets
   if (presets === undefined) {
     return { item: 'permission', status: 'skipped', detail: '当前部署没有 permissionPresets' }
+  }
+
+  /*
+   * A read failure is a defect, not an absence.
+   *
+   * Reporting "回退" with no reason is what let this go unnoticed across several
+   * handoffs: the outcome looked like a harmless fallback. It now says what went
+   * wrong, so the next occurrence is diagnosable from the result alone.
+   */
+  if (source.permissionPreset === undefined && source.permissionPresetError !== undefined) {
+    return {
+      item: 'permission',
+      status: 'skipped',
+      detail: `无法读取原会话权限预设：${source.permissionPresetError}`,
+    }
   }
 
   const target = { id: newSessionId }

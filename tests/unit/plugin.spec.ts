@@ -261,9 +261,13 @@ describe('host contract shapes (0.2.1)', () => {
     expect(String((result as { text?: string }).text)).toContain('未知子命令')
   })
 
-  it('reads sessions and agents from their separate registries', () => {
-    const sessionsGet = vi.fn(() => undefined)
-    const agentsGet = vi.fn(() => undefined)
+  it('prefers the live agent session over the store handle', () => {
+    // The agent's own `session` is guaranteed to be the host Session instance;
+    // `permissionPresets.current` needs `snapshotEvents`, which the store handle
+    // does not always have — that mismatch reported "权限：回退" every time.
+    const sessionsGet = vi.fn(() => ({ id: 's1' }))
+    const agentSession = { id: 's1', snapshotEvents: () => [] }
+    const agentsGet = vi.fn(() => ({ id: 's1', session: agentSession }))
     const fake = fakeContext({
       sessions: { get: sessionsGet },
       agents: { get: agentsGet },
@@ -272,9 +276,21 @@ describe('host contract shapes (0.2.1)', () => {
     apply(fake.ctx as never, baseConfig)
 
     fake.emit('session/event', { id: 's1' }, { type: 'assistant/message', seq: 2, data: {} })
-    // Session lookups go to `sessions`; agent lookups go to `agents`.
+    expect(agentsGet).toHaveBeenCalled()
+    expect(sessionsGet).not.toHaveBeenCalled()
+  })
+
+  it('falls back to the session store when no agent is live', () => {
+    const sessionsGet = vi.fn(() => ({ id: 's1' }))
+    const fake = fakeContext({
+      sessions: { get: sessionsGet },
+      agents: { get: () => undefined },
+      commands: { register: () => () => {} },
+    })
+    apply(fake.ctx as never, baseConfig)
+
+    fake.emit('session/event', { id: 's1' }, { type: 'assistant/message', seq: 2, data: {} })
     expect(sessionsGet).toHaveBeenCalled()
-    expect(agentsGet).not.toHaveBeenCalled()
   })
 })
 

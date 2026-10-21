@@ -121,10 +121,20 @@ export function apply(ctx: Context, config: ConfigShape): void {
    * The session log for one id.
    *
    * `ctx.sessions` stores Session objects; the agent is a separate registry.
+   *
+   * Prefers the live agent's own `session` when an agent exists: that object is
+   * guaranteed to be the host's Session instance, whereas the store lookup can
+   * return a different handle depending on the composition. `permissionPresets.
+   * current` walks the log through `snapshotEvents`, and only a real Session
+   * instance has it — the mismatch is what made every handoff report
+   * "权限：回退" with no explanation.
    */
   const sessionOf = (sessionId: string): SessionLike | undefined => {
     try {
-      return readServices(host).sessions?.get?.(sessionId)
+      const services = readServices(host)
+      const fromAgent = services.agents?.get?.(sessionId)?.session
+      if (fromAgent !== undefined) return fromAgent
+      return services.sessions?.get?.(sessionId)
     } catch {
       return undefined
     }
