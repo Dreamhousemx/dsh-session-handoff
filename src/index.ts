@@ -44,6 +44,7 @@ import {
   parseNarrative,
   readSessionFacts,
   renderBrief,
+  renderTranscript,
   type BriefNarrative,
   type SessionFacts,
 } from './session-summary.ts'
@@ -177,9 +178,18 @@ export function apply(ctx: Context, config: ConfigShape): void {
       throw new Error('原会话没有记录模型路由，也没有部署默认模型，无法生成交接简报')
     }
 
+    /*
+     * Send the transcript, not just the facts.
+     *
+     * The model cannot describe work it was never shown. The first real handoff
+     * proved this: with only configuration facts in the prompt, all nine
+     * sections came back "未知", and the receiving session had to rediscover
+     * everything. The transcript is bounded and tail-weighted by
+     * `renderTranscript`.
+     */
     const narrative = await requestNarrative(
       services.llm,
-      buildSummaryPrompt(facts),
+      buildSummaryPrompt(facts, renderTranscript(events)),
       live.summaryMaxTokens,
       route,
     )

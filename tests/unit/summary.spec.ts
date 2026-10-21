@@ -8,6 +8,7 @@ import {
   narrativeIsUsable,
   parseNarrative,
   renderBrief,
+  renderTranscript,
   sectionCoverage,
   type SessionFacts,
 } from '@src/session-summary.ts'
@@ -266,5 +267,68 @@ describe('requestNarrative (llm.stream)', () => {
     await expect(
       requestNarrative({} as never, 'p', 100, { provider: 'a', model: 'b' }),
     ).rejects.toThrow('没有 stream 方法')
+  })
+})
+
+describe('renderTranscript', () => {
+  const events = [
+    {
+      type: 'user/message',
+      seq: 1,
+      data: { message: { role: 'user', content: [{ type: 'text', text: '做一个交接插件' }] } },
+    },
+    {
+      type: 'assistant/message',
+      seq: 2,
+      data: { message: { role: 'assistant', content: [{ type: 'text', text: '先看现状' }] } },
+    },
+    { type: 'tool/call', seq: 3, data: { name: 'bash', arguments: '{"command":"ls"}' } },
+    { type: 'tool/result', seq: 4, data: { message: { content: [{ type: 'text', text: 'a b c' }] } } },
+    { type: 'turn/start', seq: 5, data: {} },
+  ]
+
+  it('renders the conversation, not just metadata', () => {
+    const text = renderTranscript(events)
+    expect(text).toContain('[用户] 做一个交接插件')
+    expect(text).toContain('[助手] 先看现状')
+    expect(text).toContain('[工具 bash]')
+  })
+
+  it('drops events that carry no readable content', () => {
+    expect(renderTranscript(events)).not.toContain('turn/start')
+  })
+
+  it('keeps the most recent lines when over budget', () => {
+    const many = Array.from({ length: 60 }, (_, i) => ({
+      type: 'user/message',
+      seq: i + 1,
+      data: { message: { role: 'user', content: [{ type: 'text', text: '消息' + i + 'x'.repeat(60) }] } },
+    }))
+    const text = renderTranscript(many, 800)
+    expect(text).toContain('消息59')
+    expect(text).toContain('省略较早的')
+    expect(text).not.toContain('消息0x')
+  })
+
+  it('says so when there is nothing to render', () => {
+    expect(renderTranscript(undefined)).toContain('没有可读的对话记录')
+  })
+
+  it('reaches the prompt so the model is not asked to guess', () => {
+    const f = {
+      cwd: '/w',
+      agentPreset: 'p',
+      provider: 'x',
+      model: 'y',
+      contextWindow: 1000,
+      permissionPreset: null,
+      planMode: 'off',
+      occupancy: { quality: 'exact', used: 1, window: 1000, percent: 0.001, baseline: 'usage' },
+      cumulative: { quality: 'exact', tokens: 1, source: 'projection' },
+      turnCount: 1,
+    } as never
+    const prompt = buildSummaryPrompt(f, renderTranscript(events))
+    expect(prompt).toContain('[用户] 做一个交接插件')
+    expect(prompt).toContain('不要写「未知」除非记录里确实没有线索')
   })
 })

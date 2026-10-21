@@ -22,7 +22,7 @@
  */
 import { foldUsageFromEvents, percentOf, type ContextOccupancy, type CumulativeUsage } from './measure.ts'
 import { redactWithReport } from './redaction.ts'
-import type { SessionLike } from './contracts.ts'
+import type { SessionEventLike, SessionLike } from './contracts.ts'
 
 /** The nine sections, in order, with the prompt wording for each. */
 export const BRIEF_SECTIONS = [
@@ -107,7 +107,95 @@ function safely<T>(read: () => T | undefined): T | undefined {
 }
 
 /** The prompt sent to the outgoing model. Every section name is explicit. */
-export function buildSummaryPrompt(facts: SessionFacts): string {
+/**
+ * Render the conversation itself into the prompt.
+ *
+ * Without this the model only sees configuration facts and a list of headings,
+ * so every section comes back "未知" — and the brief is worthless precisely when
+ * it matters. The first real handoff produced exactly that: nine sections of
+ * "unknown" because the transcript was never sent.
+ *
+ * The transcript is bounded by characters, keeping the most recent turns, since
+ * what the session is doing now matters more than how it started. Tool traffic
+ * is collapsed: arguments and results are truncated, because the brief needs to
+ * know *what* was done, not the full output of every command.
+ */
+export function renderTranscript(
+  events: readonly SessionEventLike[] | undefined,
+  budgetChars = 24_000,
+): string {
+  if (events === undefined || events.length === 0) return '（没有可读的对话记录）'
+
+  const lines: string[] = []
+  for (const event of events) {
+    const line = renderEvent(event)
+    if (line !== undefined) lines.push(line)
+  }
+
+  // Keep the tail: recent activity is what the successor must continue.
+  let total = 0
+  let start = lines.length
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const next = total + lines[i]!.length + 1
+    if (next > budgetChars) break
+    total = next
+    start = i
+  }
+
+  const kept = lines.slice(start)
+  const omitted = start
+  return (omitted > 0 ? `（省略较早的 ${omitted} 条记录）\n` : '') + kept.join('\n')
+}
+
+/** One compact line per meaningful event; everything else is dropped. */
+function renderEvent(event: SessionEventLike): string | undefined {
+  const data = event.data ?? {}
+  if (event.type === 'user/message') {
+    const text = blocksToText(data['message'] ?? data)
+    return text.length === 0 ? undefined : `[用户] ${truncate(text, 600)}`
+  }
+  if (event.type === 'assistant/message') {
+    const message = data['message'] as { content?: unknown } | undefined
+    const text = blocksToText(message)
+    return text.length === 0 ? undefined : `[助手] ${truncate(text, 900)}`
+  }
+  if (event.type === 'tool/call') {
+    const name = typeof data['name'] === 'string' ? data['name'] : '?'
+    const args = typeof data['arguments'] === 'string' ? data['arguments'] : ''
+    return `[工具 ${name}] ${truncate(args, 240)}`
+  }
+  if (event.type === 'tool/result') {
+    const message = data['message'] as { content?: unknown } | undefined
+    const text = blocksToText(message)
+    return `[工具结果] ${truncate(text, 240)}`
+  }
+  return undefined
+}
+
+/** Flatten a message's content blocks into plain text. */
+function blocksToText(message: unknown): string {
+  if (message === null || typeof message !== 'object') return ''
+  const content = (message as { content?: unknown }).content
+  if (typeof content === 'string') return content
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((block) => {
+      if (block === null || typeof block !== 'object') return ''
+      const record = block as Record<string, unknown>
+      if (typeof record['text'] === 'string') return record['text']
+      if (typeof record['arguments'] === 'string') return record['arguments']
+      return ''
+    })
+    .filter((part) => part.length > 0)
+    .join('\n')
+}
+
+function truncate(text: string, max: number): string {
+  const flat = text.replace(/\s+/g, ' ').trim()
+  return flat.length <= max ? flat : `${flat.slice(0, max)}…`
+}
+
+export function buildSummaryPrompt(facts: SessionFacts, transcript?: string): string {
   const lines: string[] = [
     '你要为「会话交接」写一份简报：当前会话即将停止，同一工作区会开一个新会话接着做。',
     '新会话看不到你现在的对话历史，只会收到这份简报。',
@@ -116,10 +204,14 @@ export function buildSummaryPrompt(facts: SessionFacts): string {
     '- 严格按下面的小节输出，使用「## 小节名」作为标题，顺序固定。',
     '- 每节写具体的、可执行的内容；不要复述你已经说过的客套话，不要写「我理解了」之类的过渡语。',
     '- 「已改文件」列真实路径；「下一步」列具体的下一条动作。',
-    '- 不要编造未发生的事；不知道就写「无」或「未知」。',
+    '- 优先依据下面提供的对话记录来写，不要写「未知」除非记录里确实没有线索。',
+    '- 不要编造未发生的事。',
     '- 不要包含任何密钥、令牌、密码或连接串的值；需要引用时只写键名。',
     '',
     `会话事实（由程序读取，请勿改写）：cwd=${facts.cwd ?? '未知'}，preset=${facts.agentPreset ?? '默认'}，模型=${facts.provider ?? '?'}/${facts.model ?? '?'}，已完成 turn 数=${facts.turnCount}。`,
+    '',
+    '对话记录（从旧到新，工具输出已截断）：',
+    transcript === undefined ? '（未提供）' : transcript,
     '',
     ...BRIEF_SECTIONS.map((section) => `## ${section.title}`),
   ]
