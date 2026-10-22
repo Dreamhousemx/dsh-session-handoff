@@ -27,3 +27,8 @@ coverage/
 .env
 .env.*
 !.env.example
+
+# Pre-edit backups taken during a repair. Local recovery only; the same content
+# is in git history, so committing them would double every diff.
+.bak-*/
+*.bak-*
