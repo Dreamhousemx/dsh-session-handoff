@@ -84,6 +84,73 @@ export function decidePreStep(
   return { kind: 'reject' }
 }
 
+/**
+ * Flatten the human text of one pre-step batch.
+ *
+ * The latch lets a human message through so the old session can act on it, but
+ * once the task has moved the message belongs to the NEW session. Carrying the
+ * text is what makes that possible; an empty result means the batch held only
+ * non-human or contentless messages, which are not worth rerouting.
+ */
+export function humanTexts(messages: readonly AgentMessageLike[] | undefined): readonly string[] {
+  if (messages === undefined || messages.length === 0) return []
+  const texts: string[] = []
+  for (const message of messages) {
+    const kind = message?.source?.kind
+    // `unknown` counts as human everywhere else in this module; keep one rule.
+    if (kind !== undefined && kind !== 'user') continue
+    const text = blocksToText(message?.content)
+    if (text.length > 0) texts.push(text)
+  }
+  return texts
+}
+
+/** Flatten a message's content blocks into text, ignoring non-text blocks. */
+function blocksToText(content: unknown): string {
+  if (typeof content === 'string') return content.trim()
+  if (!Array.isArray(content)) return ''
+  return content
+    .map((block) => {
+      if (block === null || typeof block !== 'object') return ''
+      const record = block as Record<string, unknown>
+      return typeof record['text'] === 'string' ? record['text'] : ''
+    })
+    .filter((part) => part.trim().length > 0)
+    .join('\n')
+    .trim()
+}
+
+/** Human input observed while an action was in flight, held for rerouting. */
+export class HumanInputBuffer {
+  private readonly bySession = new Map<string, string[]>()
+
+  /** Record texts for a session; returns how many were added. */
+  capture(sessionId: string, texts: readonly string[]): number {
+    if (texts.length === 0) return 0
+    const existing = this.bySession.get(sessionId) ?? []
+    existing.push(...texts)
+    this.bySession.set(sessionId, existing)
+    return texts.length
+  }
+
+  /** Take and clear everything held for a session. */
+  drain(sessionId: string): readonly string[] {
+    const texts = this.bySession.get(sessionId) ?? []
+    this.bySession.delete(sessionId)
+    return texts
+  }
+
+  /** Drop a session's buffer (disposal, unload). */
+  forget(sessionId: string): void {
+    this.bySession.delete(sessionId)
+  }
+
+  /** Sessions currently holding text; used by tests and diagnostics. */
+  ids(): readonly string[] {
+    return [...this.bySession.keys()]
+  }
+}
+
 /** Bookkeeping for every latch owned by this plugin instance. */
 export class LatchRegistry {
   private readonly latches = new Map<string, StopLatch>()

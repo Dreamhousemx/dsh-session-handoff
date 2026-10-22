@@ -39,6 +39,13 @@ export interface StatePayload {
     readonly enabled: boolean
     readonly compactEnabled: boolean
   }
+  /**
+   * Whether the browser should jump to the new session on completion.
+   *
+   * Carried here because the follower is the only component that acts on it,
+   * and the follower never reads the settings card.
+   */
+  readonly openNewSession: boolean
   readonly autoActions: number
   readonly maxAutoActions: number
   readonly persistence: 'durable' | 'memory'
@@ -59,6 +66,8 @@ export interface StateDeps {
     readonly autoCompactAtContextPercent: number
     readonly autoHandoffThreshold: number
     readonly maxAutoActionsPerSession: number
+    /** Whether to switch the browser to the new session once a handoff lands. */
+    readonly openNewSessionOnHandoff: boolean
   }
   readonly warnings: () => readonly string[]
   readonly persistence: 'durable' | 'memory'
@@ -102,6 +111,7 @@ export function statePayload(sessionId: string, deps: StateDeps): StatePayload {
     },
     autoActions: deps.autoActionsOf(sessionId),
     maxAutoActions: settings.maxAutoActionsPerSession,
+    openNewSession: settings.openNewSessionOnHandoff,
     persistence: deps.persistence,
     lastText: status.lastResult?.text,
     lastFailure: status.lastFailure?.message,

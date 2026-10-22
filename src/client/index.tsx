@@ -285,6 +285,15 @@ export function apply(ctx: ClientContext): void {
     sessions: sessionsForFollow,
     fetchState,
     currentSessionId: () => currentSessionId(sessionsForFollow),
+    /*
+     * Polling itself is unconditional; whether to JUMP is not.
+     *
+     * `enabled` gates the poll, and the poll is how a handoff is noticed at
+     * all — the plugin may complete while this page is showing a different
+     * session. The user-facing choice is `openNewSessionOnHandoff`, and the
+     * follower reads it from the state payload so the switch takes effect
+     * without the settings card having been opened.
+     */
     enabled: () => true,
     log: (message) => console.info(`[dsh-session-handoff] ${message}`),
   })

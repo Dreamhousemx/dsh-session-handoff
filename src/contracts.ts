@@ -192,10 +192,23 @@ export interface WorkspaceRegistryLike {
   ): Promise<void>
 }
 
-/** `ctx.permissionPresets` — the named permission preset a session runs under. */
+/**
+ * `ctx.permissionPresets` — the named permission preset a session runs under.
+ *
+ * Both methods take the host's own `Session` instance, not an id and not a
+ * `{ id }` lookalike. `set` folds the target's log through the `permissions`
+ * projection (`stateOf` → `materializeCells` → `snapshotEvents`) and then
+ * APPENDS `permission/preset`, `sandbox/mode` and `approval/policy` events to
+ * it, so an object that merely carries an id throws
+ * "session.snapshotEvents is not a function" before anything is written.
+ *
+ * Declaring the parameter as `{ id } | SessionId` is what let the write path
+ * compile while failing on every real handoff, so the narrow type is the fix's
+ * other half: passing anything but a Session is now a type error.
+ */
 export interface PermissionPresetsLike {
   current(session: SessionLike): string | undefined
-  set(session: { id?: SessionId } | SessionId, name: string): Promise<void> | void
+  set(session: SessionLike, name: string): Promise<void> | void
 }
 
 /** `ctx.approval` — the policy behind a `custom` permission preset. */

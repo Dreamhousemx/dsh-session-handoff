@@ -47,6 +47,14 @@ export interface SessionFacts {
   readonly model: string | undefined
   readonly contextWindow: number | undefined
   readonly permissionPreset: string | undefined
+  /**
+   * Why the permission preset could not be read, when it could not.
+   *
+   * Present means "we tried and failed", which is a different fact from "this
+   * deployment has no presets". The brief reports which one it is: printing a
+   * bare "未知" is how a broken read passed for a healthy default.
+   */
+  readonly permissionError?: string
   readonly planMode: 'on' | 'off' | 'unknown'
   readonly occupancy: ContextOccupancy
   readonly cumulative: CumulativeUsage
@@ -308,6 +316,19 @@ export function narrativeIsUsable(narrative: BriefNarrative): boolean {
   return sectionCoverage(narrative) >= MIN_SECTION_COVERAGE
 }
 
+/**
+ * Describe the permission preset, distinguishing "unknown" from "failed".
+ *
+ * Three outcomes, three sentences. A read that threw is reported with its
+ * reason, because "未知" alone reads as "this session simply has none" — that
+ * ambiguity is exactly what kept the preset-inheritance bug invisible.
+ */
+function permissionLine(facts: SessionFacts): string {
+  if (facts.permissionPreset !== undefined) return facts.permissionPreset
+  if (facts.permissionError !== undefined) return `读取失败（${facts.permissionError}）`
+  return '未知'
+}
+
 /** Render the final brief, including the redaction report. */
 export function renderBrief(input: {
   facts: SessionFacts
@@ -332,7 +353,7 @@ export function renderBrief(input: {
     `- 模型：${facts.provider ?? '?'} / ${facts.model ?? '?'}${
       facts.contextWindow === undefined ? '' : `（上下文窗口 ${facts.contextWindow} tokens）`
     }`,
-    `- 权限预设：${facts.permissionPreset ?? '未知'}`,
+    `- 权限预设：${permissionLine(facts)}`,
     `- Plan 模式：${facts.planMode === 'unknown' ? '未知' : facts.planMode === 'on' ? '开启' : '关闭'}`,
     `- 上下文占用：${
       occupancyPercent === undefined

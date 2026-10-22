@@ -44,6 +44,13 @@ export interface CoordinatorDeps {
   /** Deliver a human message that arrived mid-flight to the new session. */
   readonly reroute?: (newSessionId: string, text: string) => Promise<boolean>
   /**
+   * Take and clear the human texts held for one session.
+   *
+   * Absent means "this host cannot observe mid-flight input", in which case
+   * nothing is rerouted and nothing is claimed to have been.
+   */
+  readonly drainHumanInput?: (sessionId: string) => readonly string[]
+  /**
    * Stand the source session down once its work has moved.
    *
    * Called only after the brief was delivered, so a failure here can never lose
@@ -54,6 +61,20 @@ export interface CoordinatorDeps {
   readonly now?: () => number
   readonly log?: (message: string) => void
 }
+
+/**
+ * Handoff phases in which new human input aborts the handoff.
+ *
+ * The boundary is the new session's creation. Before it exists, cancelling
+ * costs nothing and keeps the user's message in the session they typed into.
+ * From `transferring` onwards a session already exists, so the text is
+ * forwarded to it instead of cancelling.
+ */
+const ABORTABLE_BEFORE_NEW_SESSION: ReadonlySet<Phase> = new Set<Phase>([
+  'preparing',
+  'waiting-for-step-boundary',
+  'summarizing',
+])
 
 /** Live bookkeeping for one session's action. */
 interface Run {
@@ -116,6 +137,32 @@ export class Coordinator {
     if (run === undefined) return false
     run.cancelRequested = true
     this.deps.log?.(`handoff: 已请求取消 ${sessionId}（在下一个安全检查点生效）`)
+    return true
+  }
+
+  /**
+   * Abort a handoff because the human is talking to the old session again.
+   *
+   * Before the new session exists, a handoff is pure loss for the user: the
+   * session they are typing into is about to be retired while its replacement
+   * has none of what they just said. Those phases therefore abort, and the
+   * message stays where it was typed. Once the new session EXISTS
+   * (`transferring` onwards) the text is forwarded instead — see
+   * `reroutePending` — because aborting then would strand a session that has
+   * already been created.
+   *
+   * Returns whether this call cancelled anything, so the caller can log a
+   * truthful reason rather than assuming one.
+   */
+  abortForHumanInput(sessionId: string): boolean {
+    const run = this.runs.get(sessionId)
+    if (run === undefined || run.cancelRequested) return false
+    if (run.kind !== 'handoff') return false
+    if (!ABORTABLE_BEFORE_NEW_SESSION.has(run.phase)) return false
+    run.cancelRequested = true
+    this.deps.log?.(
+      `handoff: 收到人类输入，取消 ${sessionId} 的交接（阶段 ${run.phase}，原会话继续）`,
+    )
     return true
   }
 
@@ -300,6 +347,23 @@ export class Coordinator {
     // was. Retiring first would mean a delivery failure strands the task in a
     // session that is already standing down.
     run.phase = 'transferring'
+
+    /*
+     * Move any human input that arrived mid-flight to the session that now owns
+     * the task.
+     *
+     * The latch deliberately lets human messages through (rejecting a step
+     * would swallow what the user typed), so during a handoff the old session
+     * may still receive real instructions. Once the brief has landed those
+     * messages belong to the successor: leaving them in a session that is about
+     * to be archived puts the user's words nowhere they will be read.
+     *
+     * This runs BEFORE retire so the successor has the text even if archiving
+     * fails, and a reroute failure never fails the handoff — the task is
+     * already safe in the new session.
+     */
+    const rerouted = await this.reroutePending(sessionId, migrated.newSessionId)
+
     const retired = await this.retire(sessionId, migrated.newSessionId)
 
     return this.finish(sessionId, {
@@ -307,6 +371,7 @@ export class Coordinator {
       phase: 'completed',
       text: [
         `交接完成：新会话 ${migrated.newSessionId ?? '(未知)'} 已接手。`,
+        rerouted,
         retired,
         redactions.length === 0
           ? ''
@@ -316,6 +381,41 @@ export class Coordinator {
         .filter((line) => line.length > 0)
         .join('\n'),
     })
+  }
+
+  /**
+   * Hand any buffered human input to the session that now owns the task.
+   *
+   * Returns a report line, or `''` when there was nothing to move. A failure is
+   * reported rather than thrown: the brief is already delivered and the task is
+   * safe, so a failed forward must not be presented as a failed handoff.
+   */
+  private async reroutePending(
+    sessionId: string,
+    newSessionId: string | undefined,
+  ): Promise<string> {
+    const reroute = this.deps.reroute
+    if (reroute === undefined || newSessionId === undefined) return ''
+
+    const drain = this.deps.drainHumanInput
+    if (drain === undefined) return ''
+    const texts = drain(sessionId)
+    if (texts.length === 0) return ''
+
+    let moved = 0
+    for (const text of texts) {
+      try {
+        if (await reroute(newSessionId, text)) moved += 1
+      } catch {
+        // Keep trying the rest: one rejected forward must not strand the others.
+      }
+    }
+    if (moved === 0) {
+      return `交接期间收到的 ${texts.length} 条消息未能转投新会话，请手动转发。`
+    }
+    return moved === texts.length
+      ? `交接期间收到的 ${moved} 条消息已转投新会话。`
+      : `交接期间收到的 ${texts.length} 条消息中，${moved} 条已转投新会话，其余请手动转发。`
   }
 
   /**

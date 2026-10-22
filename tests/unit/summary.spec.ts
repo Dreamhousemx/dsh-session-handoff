@@ -188,8 +188,29 @@ describe('renderBrief', () => {
     expect(text).toContain('已被替换为占位符')
   })
 
-  it('says a missing window is unknown instead of claiming zero percent', () => {
+  it('reports a failed permission read with its reason, not a bare unknown', () => {
+    // "未知" alone reads as "this session simply has none", which is exactly
+    // how a broken read passed for a healthy default across several handoffs.
     const brief = renderBrief({
+      facts: facts({ permissionPreset: undefined, permissionError: 'snapshotEvents is not a function' }),
+      narrative: { goal: 'g', done: 'd', next: 'n' },
+      sourceSessionId: 's',
+      createdAt: 0,
+    }).text
+    expect(brief).toContain('权限预设：读取失败（snapshotEvents is not a function）')
+  })
+
+  it('still prints a plain unknown when nothing was read at all', () => {
+    const brief = renderBrief({
+      facts: facts({ permissionPreset: undefined }),
+      narrative: { goal: 'g', done: 'd', next: 'n' },
+      sourceSessionId: 's',
+      createdAt: 0,
+    }).text
+    expect(brief).toContain('权限预设：未知')
+  })
+
+  it('says a missing window is unknown instead of claiming zero percent', () => {    const brief = renderBrief({
       facts: facts({ occupancy: { quality: 'unavailable', used: 0, window: undefined, percent: undefined, baseline: 'none' } }),
       narrative: { goal: 'g', done: 'd', next: 'n' },
       sourceSessionId: 's',

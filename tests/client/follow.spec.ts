@@ -2,7 +2,11 @@ import { describe, expect, it, vi } from 'vitest'
 import { FOLLOW_MAX_ATTEMPTS, HandoffFollower, type SessionsLike } from '@src/client/follow'
 import type { HandoffState } from '@src/client/protocol'
 
-function state(sessionId: string, newSessionId?: string): HandoffState {
+function state(
+  sessionId: string,
+  newSessionId?: string,
+  openNewSession = true,
+): HandoffState {
   return {
     ok: true,
     sessionId,
@@ -17,6 +21,7 @@ function state(sessionId: string, newSessionId?: string): HandoffState {
     occupancy: { quality: 'exact', used: 0, window: 200_000, percent: 0 },
     cumulative: { tokens: 0, source: 'projection', quality: 'exact' },
     thresholds: { handoffPercent: 85, compactPercent: 70, cumulative: 2_000_000, enabled: true, compactEnabled: false },
+    openNewSession,
     autoActions: 0,
     maxAutoActions: 3,
     persistence: 'durable',
@@ -93,6 +98,20 @@ describe('HandoffFollower — baseline rule', () => {
     await f.tick()
     await f.tick()
     expect(open).toHaveBeenCalledTimes(1)
+  })
+
+  it('stays put when the user turned the jump off', async () => {
+    // `openNewSessionOnHandoff: false` is a real preference (compare the two
+    // sessions side by side). The follower used to jump regardless, which made
+    // the checkbox do nothing at all.
+    const open = vi.fn()
+    const f = follower({
+      sessions: { ...sessions({ current: 's1', rows: { new1: { blank: false } } }), open },
+      states: [state('s1', undefined, false), state('s1', 'new1', false)],
+    })
+    await f.tick()
+    await f.tick()
+    expect(open).not.toHaveBeenCalled()
   })
 })
 

@@ -136,6 +136,27 @@ export class Monitor {
     this.rowFor(sessionId).state.pending = true
   }
 
+  /**
+   * Clear the in-flight flag without touching counters or rearm gates.
+   *
+   * Every entry point sets `pending` so the engine stops proposing decisions,
+   * but only the AUTOMATIC path used to clear it — `settle()` runs from
+   * `execute()` and nowhere else. A manual `/handoff` (or a manual call that
+   * bounced off the "already in flight" / "blank session" guards) therefore
+   * left `pending` true forever, and `evaluate()` returns early on `pending`
+   * (trigger.ts). With `archiveSourceAfterHandoff: false` the old session keeps
+   * running, so one manual handoff silently disabled automatic handoff for that
+   * session with no visible cause.
+   *
+   * A manual action deliberately does not run the automatic bookkeeping: it
+   * must not consume the per-session cap, and it must not move rearm gates that
+   * describe threshold crossings.
+   */
+  releasePending(sessionId: string): void {
+    const row = this.rows.get(sessionId)
+    if (row !== undefined) row.state.pending = false
+  }
+
   /** Apply an action's outcome to the trigger's rearm gates and counters. */
   settle(
     sessionId: string,

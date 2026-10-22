@@ -33,7 +33,7 @@
 import type { Context } from '@deepseek-ai/cordis'
 import { readServices, INJECT } from './services.ts'
 import { Config, CONFIG_DEFAULTS, validateSettings, withDefaults, type Config as ConfigShape } from './settings.ts'
-import { LatchRegistry, decidePreStep, waitForBoundary } from './graceful-stop.ts'
+import { HumanInputBuffer, LatchRegistry, decidePreStep, humanTexts, waitForBoundary } from './graceful-stop.ts'
 import { Coordinator } from './coordinator.ts'
 import { Monitor, compactRunner } from './monitor.ts'
 import { renderStatus, parseCommandArgs, runCommand } from './command.ts'
@@ -52,6 +52,8 @@ import {
   deliverBrief,
   migrateSession,
   planModeFor,
+  PLUGIN_SOURCE_KIND,
+  readPermissionPreset,
   snapshotSource,
   type MigrationResult,
 } from './session-migration.ts'
@@ -115,6 +117,16 @@ export function apply(ctx: Context, config: ConfigShape): void {
   let live = config
 
   const latches = new LatchRegistry()
+
+  /**
+   * Human text observed while an action was in flight.
+   *
+   * The latch lets human messages through rather than rejecting the step (a
+   * rejected step claims the messages but never persists or re-queues them, so
+   * the user's words would vanish). Once the task moves, those words belong to
+   * the successor session, and this buffer is what carries them there.
+   */
+  const humanInput = new HumanInputBuffer()
 
   /** Resolve the session log for an id, without waking an agent. */
   /**
@@ -223,16 +235,20 @@ export function apply(ctx: Context, config: ConfigShape): void {
     services: ReturnType<typeof readServices>,
     agent: AgentLike,
   ): SessionFacts => {
-    let permissionPreset: string | undefined
-    try {
-      permissionPreset = services.permissionPresets?.current(agent.session as never)
-    } catch {
-      permissionPreset = undefined
-    }
+    /*
+     * Capture the failure, never swallow it.
+     *
+     * This used to be `try { current(...) } catch { undefined }`, which made a
+     * throwing read indistinguishable from "this session has no preset". The
+     * brief then printed a bare "未知" and nobody could tell that the plugin
+     * had actually failed to look.
+     */
+    const permissionRead = readPermissionPreset(agent.session, services.permissionPresets)
     const plan = planModeFor(agent, services.agentPresets)
     return {
       ...facts,
-      permissionPreset,
+      permissionPreset: permissionRead.value,
+      ...(permissionRead.error === undefined ? {} : { permissionError: permissionRead.error }),
       planMode: plan === undefined ? 'unknown' : plan.active ? 'on' : 'off',
     }
   }
@@ -249,6 +265,31 @@ export function apply(ctx: Context, config: ConfigShape): void {
       signal: new AbortController().signal,
     }),
     migrate: async (brief) => migrateFor(brief, host, agentOf, sessionOf),
+    /*
+     * Forward mid-flight human input to the successor.
+     *
+     * `followup` is the same delivery path the brief uses, so the forwarded text
+     * is framed as plugin input rather than as something the user typed into the
+     * new session — which is what it is: a message they typed into the OLD one.
+     */
+    drainHumanInput: (sessionId) => humanInput.drain(sessionId),
+    reroute: async (newSessionId, text) => {
+      const target = agentOf(newSessionId)
+      if (target === undefined || typeof target.followup !== 'function') return false
+      try {
+        await target.followup(
+          {
+            role: 'user',
+            source: { kind: PLUGIN_SOURCE_KIND },
+            content: [{ type: 'text', text }],
+          } as never,
+          { source: { kind: PLUGIN_SOURCE_KIND } } as never,
+        )
+        return true
+      } catch {
+        return false
+      }
+    },
     waitIdle: async (agent) => {
       if (typeof agent.whenIdle === 'function') await agent.whenIdle()
     },
@@ -324,6 +365,44 @@ export function apply(ctx: Context, config: ConfigShape): void {
     log,
   })
 
+  /**
+   * Run one MANUAL action, clearing the in-flight flag however it ends.
+   *
+   * The flag is what stops the trigger engine from proposing a second action
+   * while one runs, so every manual entry point sets it. Clearing it is the
+   * other half, and only the automatic path had that: `settle()` is called from
+   * `Monitor.execute()` alone, so a manual handoff left `pending` true for the
+   * rest of the session's life — and `evaluate()` bails out on `pending`. With
+   * `archiveSourceAfterHandoff: false` (which keeps the old session alive) that
+   * meant one manual `/handoff` silently disabled automatic handoff forever.
+   *
+   * Automatic bookkeeping is deliberately NOT run here: a manual action must
+   * not consume the per-session cap or move rearm gates, which describe
+   * threshold crossings rather than user intent.
+   */
+  const runManual = async (
+    sessionId: string,
+    request: { kind: 'handoff'; detail?: string; reason?: 'manual' },
+  ): Promise<ActionResult> => {
+    monitor.markPending(sessionId)
+    try {
+      // Scoped to this action: a concurrent automatic handoff for another
+      // session keeps its own id.
+      return await sourceScope.run(sessionId, () =>
+        coordinator.run({
+          sessionId,
+          agent: agentOf(sessionId),
+          kind: request.kind,
+          reason: request.reason ?? 'manual',
+          automatic: false,
+          ...(request.detail === undefined ? {} : { detail: request.detail }),
+        }),
+      )
+    } finally {
+      monitor.releasePending(sessionId)
+    }
+  }
+
   const statusText = (sessionId: string): string => {
     const services = readServices(host)
     const status = coordinator.statusOf(sessionId)
@@ -368,7 +447,23 @@ export function apply(ctx: Context, config: ConfigShape): void {
       if (!latches.isLatched(agentId)) return next()
 
       const decision = decidePreStep(true, payload?.messages as never)
-      if (decision === undefined) return next()
+      if (decision === undefined) {
+        /*
+         * The latch yielded to human input, which means the batch is about to
+         * become a real step in THIS session.
+         *
+         * Two things follow, and both need the text: abort the handoff if it has
+         * not committed to a new session yet (the user is clearly still working
+         * here), and record the text so a handoff that DOES complete forwards it
+         * to the successor. Recording happens first so the forward has the text
+         * even if the abort wins the race.
+         */
+        humanInput.capture(agentId, humanTexts(payload?.messages as never))
+        if (coordinator.abortForHumanInput(agentId)) {
+          log(`dsh-session-handoff: 收到人类输入，已取消 ${agentId} 的交接，原会话继续`)
+        }
+        return next()
+      }
       log(`dsh-session-handoff: 拒绝启动下一个 Step（${agentId}），等待交接`)
       return decision
     })
@@ -450,36 +545,12 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
           try {
             const outcome = await runCommand(parseCommandArgs(raw), sessionId, {
-              handoff: async (id, detail) => {
-                monitor.markPending(id)
-                // Scoped to this action: a concurrent automatic handoff for
-                // another session keeps its own id.
-                return sourceScope.run(id, () =>
-                  coordinator.run({
-                    sessionId: id,
-                    agent: agentOf(id),
-                    kind: 'handoff',
-                    reason: 'manual',
-                    automatic: false,
-                    ...(detail === undefined ? {} : { detail }),
-                  }),
-                )
-              },
+              handoff: async (id, detail) =>
+                runManual(id, { kind: 'handoff', ...(detail === undefined ? {} : { detail }) }),
               cancel: (id) => coordinator.requestCancel(id),
               status: statusText,
-              retry: async (id) => {
-                monitor.markPending(id)
-                return sourceScope.run(id, () =>
-                  coordinator.run({
-                    sessionId: id,
-                    agent: agentOf(id),
-                    kind: 'handoff',
-                    reason: 'manual',
-                    automatic: false,
-                    detail: '手动 retry',
-                  }),
-                )
-              },
+              retry: async (id) =>
+                runManual(id, { kind: 'handoff', detail: '手动 retry' }),
             })
             return outcome.ok
               ? { kind: 'success', text: outcome.text }
@@ -625,17 +696,10 @@ export function apply(ctx: Context, config: ConfigShape): void {
           }
 
           if (action === 'handoff' || action === 'retry') {
-            monitor.markPending(sessionId)
-            const result = await sourceScope.run(sessionId, () =>
-              coordinator.run({
-                sessionId,
-                agent: agentOf(sessionId),
-                kind: 'handoff',
-                reason: 'manual',
-                automatic: false,
-                detail: action === 'retry' ? '手动 retry' : '手动 handoff',
-              }),
-            )
+            const result = await runManual(sessionId, {
+              kind: 'handoff',
+              detail: action === 'retry' ? '手动 retry' : '手动 handoff',
+            })
             sendJson(res, 200, result)
             return
           }

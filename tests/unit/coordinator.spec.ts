@@ -40,6 +40,86 @@ function handoff(agent: AgentLike | undefined, overrides: Partial<ActionRequest>
   return { sessionId: 's1', agent, kind: 'handoff', reason: 'manual', automatic: false, ...overrides }
 }
 
+describe('Coordinator — human input that arrives mid-flight', () => {
+  it('cancels a handoff that has not created a session yet', async () => {
+    // The latch lets human messages through, so before a new session exists the
+    // only safe answer is to abort: the user is plainly still working here.
+    let coordinator: Coordinator
+    const d = deps({
+      summarize: async () => {
+        coordinator.abortForHumanInput('s1')
+        return { brief: '# 简报', redactions: [] }
+      },
+    })
+    coordinator = new Coordinator(d)
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.ok).toBe(false)
+    expect(result.phase).toBe('cancelled')
+  })
+
+  it('refuses to abort once a new session exists', async () => {
+    // From `transferring` onwards a session has been created; cancelling then
+    // would strand it, so the text is forwarded instead.
+    let aborted = false
+    let coordinator: Coordinator
+    const d = deps({
+      migrate: async () => {
+        aborted = coordinator.abortForHumanInput('s1')
+        return success()
+      },
+    })
+    coordinator = new Coordinator(d)
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(aborted).toBe(false)
+    expect(result.ok).toBe(true)
+  })
+
+  it('does not cancel a compaction', async () => {
+    const coordinator = new Coordinator(deps())
+    const started = coordinator.run({ sessionId: 's1', agent: idleAgent(), kind: 'compact', reason: 'context', automatic: true })
+    expect(coordinator.abortForHumanInput('s1')).toBe(false)
+    await started
+  })
+
+  it('forwards buffered human text to the new session', async () => {
+    const reroute = vi.fn(async () => true)
+    const coordinator = new Coordinator(
+      deps({ reroute, drainHumanInput: () => ['继续，先跑测试'] }),
+    )
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(reroute).toHaveBeenCalledWith('new-1', '继续，先跑测试')
+    expect(result.text).toContain('已转投新会话')
+  })
+
+  it('reports a forward that found nobody, instead of claiming success', async () => {
+    const coordinator = new Coordinator(
+      deps({ reroute: async () => false, drainHumanInput: () => ['你好'] }),
+    )
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.text).toContain('未能转投')
+  })
+
+  it('does not fail the handoff when a forward throws', async () => {
+    const coordinator = new Coordinator(
+      deps({
+        reroute: async () => {
+          throw new Error('followup rejected')
+        },
+        drainHumanInput: () => ['你好'],
+      }),
+    )
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.ok).toBe(true)
+    expect(result.text).toContain('未能转投')
+  })
+
+  it('says nothing about rerouting when there was no input', async () => {
+    const coordinator = new Coordinator(deps({ drainHumanInput: () => [] }))
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.text).not.toContain('转投')
+  })
+})
+
 describe('Coordinator — handoff happy path', () => {
   it('walks through the phases and reports the new session', async () => {
     const d = deps()

@@ -106,6 +106,21 @@ export class HandoffFollower {
     if (previous !== undefined || next === undefined) return
     if (this.switchedFor.has(sessionId)) return
 
+    /*
+     * Honour the user's switch.
+     *
+     * `openNewSessionOnHandoff` exists because some people want to stay put and
+     * compare the two sessions. The follower used to jump unconditionally,
+     * which made the checkbox a decoration: turning it off changed nothing.
+     * The state payload carries the value, so this decision does not depend on
+     * the settings card ever having been open.
+     */
+    if (state?.openNewSession === false) {
+      this.switchedFor.add(sessionId)
+      this.deps.log?.(`handoff: 设置要求不自动跳转，停留在当前会话（新会话 ${next}）`)
+      return
+    }
+
     await this.switchTo(next, state)
   }
 

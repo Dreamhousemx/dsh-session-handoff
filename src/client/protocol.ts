@@ -35,6 +35,13 @@ export interface HandoffState {
     readonly enabled: boolean
     readonly compactEnabled: boolean
   }
+  /**
+   * Whether the browser should jump to the new session on completion.
+   *
+   * Carried in the state payload because the follower is the only component
+   * that can act on it, and it never reads the settings card.
+   */
+  readonly openNewSession: boolean
   readonly autoActions: number
   readonly maxAutoActions: number
   readonly persistence: 'durable' | 'memory'

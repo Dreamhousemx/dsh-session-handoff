@@ -354,6 +354,35 @@ async function inheritModel(
   }
 }
 
+/**
+ * Resolve the new session's real `Session` object through its live agent.
+ *
+ * The migration is handed an id, but every permission-preset write needs the
+ * log handle itself. The agent's own `session` IS that instance; there is no
+ * second registry to consult, because `ctx.sessions.get(id)` returns the very
+ * same object (`get(id) { return this.store.get(id)?.session }`).
+ *
+ * Returning `undefined` is a reportable outcome, not a silent one: the caller
+ * distinguishes "new session not activated yet" from "the write failed".
+ */
+function targetSessionOf(
+  newSessionId: string,
+  deps: MigrationDeps,
+): SessionLike | undefined {
+  const agent = deps.resolveAgent(newSessionId)
+  return agent?.session
+}
+
+/**
+ * Expose the permission step to tests without widening the public surface.
+ *
+ * The bug this covers was invisible for several handoffs precisely because no
+ * test ever called this function with a host-shaped service; the only paths
+ * exercised were the ones that skipped it. Exporting it lets the regression test
+ * assert the exact object handed to `set()`.
+ */
+export const inheritPermissionForTest = inheritPermission
+
 async function inheritPermission(
   newSessionId: string,
   source: SourceSnapshot,
@@ -379,10 +408,29 @@ async function inheritPermission(
     }
   }
 
-  const target = { id: newSessionId }
+  /*
+   * Write through the new session's REAL `Session`, never a `{ id }` placeholder.
+   *
+   * This is the defect that survived several "successful" handoffs. `set()`
+   * folds the target's log through the `permissions` projection and then
+   * appends three events to it, so a lookalike object throws
+   * "session.snapshotEvents is not a function" — which the catch below turned
+   * into an innocent-looking "回退". The read side had been working all along:
+   * the old code only reported "回退" from this catch block, never from a failed
+   * read.
+   */
+  const target = targetSessionOf(newSessionId, deps)
+  if (target === undefined) {
+    return {
+      item: 'permission',
+      status: 'skipped',
+      detail: '无法解析新会话的 Session 对象（新会话尚未激活），权限未写入',
+    }
+  }
+
   try {
     if (source.permissionPreset !== undefined) {
-      await presets.set(target as never, source.permissionPreset)
+      await presets.set(target, source.permissionPreset)
       return { item: 'permission', status: 'inherited', detail: source.permissionPreset }
     }
 
