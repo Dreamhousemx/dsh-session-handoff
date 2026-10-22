@@ -76,6 +76,16 @@ export interface CoordinatorDeps {
    */
   readonly drainHumanInput?: (sessionId: string) => readonly string[]
   /**
+   * Discard any human texts held for one session.
+   *
+   * Used when the action ends WITHOUT moving the task — cancelled, failed, or
+   * aborted by the human's own input. Those paths never call `drain`, so
+   * without this the captured text survives in the buffer and the next
+   * successful handoff for the same session forwards stale words to an
+   * unrelated successor. Absent means "this host keeps no such buffer".
+   */
+  readonly discardHumanInput?: (sessionId: string) => void
+  /**
    * Stand the source session down once its work has moved.
    *
    * Called only after the brief was delivered, so a failure here can never lose
@@ -635,6 +645,17 @@ export class Coordinator {
 
   private finish(sessionId: string, result: ActionResult): ActionResult {
     this.lastResults.set(sessionId, result)
+    /*
+     * A task that did not move leaves no claim on the captured text.
+     *
+     * `drain` runs only on the delivery path, so every other ending
+     * (`cancelled`, `failed`, an abort caused by the human typing) used to leave
+     * the buffer populated. The next successful handoff for that session then
+     * forwarded someone else's earlier words to the successor, framed as
+     * "messages received during the handoff". Discarding here is the single
+     * place every ending passes through.
+     */
+    if (result.phase !== 'completed') this.deps.discardHumanInput?.(sessionId)
     if (!result.ok && result.phase === 'failed') {
       this.lastFailures.set(sessionId, {
         at: (this.deps.now ?? Date.now)(),

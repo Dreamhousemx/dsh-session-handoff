@@ -629,3 +629,88 @@ describe('Coordinator — the deadline is enforced, not merely offered', () => {
     expect(d.latches.isLatched('s1')).toBe(false)
   })
 })
+
+/*
+ * A handoff that does not move the task must not leave text in the buffer.
+ *
+ * `drain` runs only on the delivery path, so a cancelled or failed action used
+ * to keep whatever the user typed mid-flight; the next successful handoff for
+ * that session forwarded those stale words to an unrelated successor, framed as
+ * "messages received during the handoff".
+ */
+describe('Coordinator — captured input is discarded when the task does not move', () => {
+  it('discards on a cancelled handoff', async () => {
+    const discard = vi.fn()
+    let coordinator: Coordinator
+    const d = deps({
+      discardHumanInput: discard,
+      summarize: async () => {
+        coordinator.abortForHumanInput('s1')
+        return { brief: '# 简报', redactions: [] }
+      },
+    })
+    coordinator = new Coordinator(d)
+
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.phase).toBe('cancelled')
+    expect(discard).toHaveBeenCalledWith('s1')
+  })
+
+  it('discards on a failed handoff', async () => {
+    const discard = vi.fn()
+    const d = deps({
+      discardHumanInput: discard,
+      summarize: async () => {
+        throw new Error('模型调用失败')
+      },
+    })
+
+    const result = await new Coordinator(d).run(handoff(idleAgent()))
+    expect(result.phase).toBe('failed')
+    expect(discard).toHaveBeenCalledWith('s1')
+  })
+
+  it('discards on a failed compaction', async () => {
+    const discard = vi.fn()
+    const d = deps({
+      discardHumanInput: discard,
+      compact: async () => ({ kind: 'failed', code: 'summary', message: 'x', retryable: false }),
+    })
+
+    await new Coordinator(d).run({
+      sessionId: 's1',
+      agent: { id: 's1', status: 'idle', whenIdle: () => Promise.resolve() },
+      kind: 'compact',
+      reason: 'context',
+      automatic: true,
+    })
+    expect(discard).toHaveBeenCalledWith('s1')
+  })
+
+  it('does NOT discard on a completed handoff, where drain already ran', async () => {
+    const discard = vi.fn()
+    const drain = vi.fn(() => [] as string[])
+    // `reroutePending` returns early unless BOTH a reroute target and a drain
+    // are supplied, so this case needs both to prove that drain actually ran.
+    const d = deps({
+      discardHumanInput: discard,
+      drainHumanInput: drain,
+      reroute: async () => true,
+    })
+
+    const result = await new Coordinator(d).run(handoff(idleAgent()))
+    expect(result.phase).toBe('completed')
+    expect(drain).toHaveBeenCalled()
+    expect(discard).not.toHaveBeenCalled()
+  })
+
+  it('is a no-op when the host supplies no buffer', async () => {
+    const d = deps({
+      summarize: async () => {
+        throw new Error('boom')
+      },
+    })
+    const result = await new Coordinator(d).run(handoff(idleAgent()))
+    expect(result.phase).toBe('failed')
+  })
+})

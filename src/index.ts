@@ -284,6 +284,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
      * new session — which is what it is: a message they typed into the OLD one.
      */
     drainHumanInput: (sessionId) => humanInput.drain(sessionId),
+    discardHumanInput: (sessionId) => humanInput.forget(sessionId),
     reroute: async (newSessionId, text) => {
       const target = agentOf(newSessionId)
       if (target === undefined || typeof target.followup !== 'function') return false
@@ -440,7 +441,15 @@ export function apply(ctx: Context, config: ConfigShape): void {
       lastText: status.lastResult?.text,
       lastFailure: status.lastFailure?.message,
       warnings: validation.warnings.map((warning) => warning.message),
-      persistence: readServices(host) === undefined ? 'memory' : 'durable',
+      /*
+       * `readServices` always returns an object, so the old
+       * `readServices(host) === undefined ? 'memory' : 'durable'` was always
+       * `'durable'` and the "settings apply to this process only" warning in
+       * `renderStatus` was unreachable. Durability is a question about whether
+       * the deployment can PERSIST a settings change, which is the config
+       * editor, not the service reader.
+       */
+      persistence: readServices(host).configEditor === undefined ? 'memory' : 'durable',
     })
   }
 
@@ -493,7 +502,20 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
     const offDisposed = host.on('session/disposed', (...args: unknown[]) => {
       const sessionId = (args[0] as { id?: string } | undefined)?.id
-      if (sessionId !== undefined) monitor.forget(sessionId)
+      if (sessionId !== undefined) {
+        monitor.forget(sessionId)
+        /*
+         * Drop any text captured for this session.
+         *
+         * `HumanInputBuffer` used to be cleared only by a SUCCESSFUL handoff
+         * (`drain` inside `reroutePending`), and its own `forget()` was never
+         * called from here — only the coordinator was forgotten. A handoff that
+         * was cancelled or failed therefore kept whatever the user typed
+         * mid-flight, and the NEXT successful handoff for that session would
+         * forward stale words to an unrelated successor.
+         */
+        humanInput.forget(sessionId)
+      }
     })
 
     /*
@@ -635,7 +657,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
                   }
                   return warnings
                 },
-                persistence: 'durable',
+                // Same rule as the status report: durable means the deployment
+                // can persist a settings write, i.e. it has a config editor.
+                persistence: services.configEditor === undefined ? 'memory' : 'durable',
               }),
             )
             return
