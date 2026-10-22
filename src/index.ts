@@ -176,7 +176,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
 
     let facts: SessionFacts = readSessionFacts({
       session,
-      occupancy: readContextOccupancy(session, services.tokenMeter),
+      occupancy: readContextOccupancy(session, services.tokenMeter, services.sessionProjections),
       cumulative: readCumulativeUsage(session, services.sessionProjections, services.tokenMeter),
       events,
     })
@@ -415,7 +415,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       waitingForStep: status.waitingForStep,
       slowWarning: status.slowWarning,
       newSessionId: status.newSessionId,
-      occupancy: readContextOccupancy(session, services.tokenMeter),
+      occupancy: readContextOccupancy(session, services.tokenMeter, services.sessionProjections),
       cumulative: readCumulativeUsage(session, services.sessionProjections, services.tokenMeter),
       thresholds: {
         handoffPercent: live.autoHandoffAtContextPercent,

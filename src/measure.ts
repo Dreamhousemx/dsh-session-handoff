@@ -29,6 +29,16 @@ export interface ContextOccupancy {
   readonly percent: number | undefined
   /** Where `used` came from: real provider usage, a heuristic, or nothing. */
   readonly baseline: 'usage' | 'estimated' | 'none'
+  /**
+   * Which accessor produced `used`.
+   *
+   * `contextPressure` is the projection the composer's own meter reads, so this
+   * is what makes the plugin's number agree with the number the user sees.
+   * `meter-surface` is the older heuristic replay, kept as the fallback for a
+   * deployment that folds no projection. Optional so a caller that only cares
+   * about the numbers (tests, older fixtures) need not fill it in.
+   */
+  readonly source?: 'contextPressure' | 'meter-surface' | 'none'
   /** Populated only when measurement failed. */
   readonly error?: string
 }
@@ -47,45 +57,119 @@ const EMPTY_CONTEXT: ContextOccupancy = {
   window: undefined,
   percent: undefined,
   baseline: 'none',
+  source: 'none',
+}
+
+/**
+ * Read the `contextPressure` projection the composer's meter also reads.
+ *
+ * Returns `undefined` when the unit is not registered on this deployment, which
+ * is not an error: the meter replay below is the documented fallback.
+ */
+function readPressureProjection(
+  session: SessionLike,
+  projections: SessionProjectionsLike | undefined,
+): { used: number; baseline: 'usage' | 'estimated'; window?: number } | undefined {
+  if (projections === undefined) return undefined
+  let state: unknown
+  try {
+    state = projections.stateOf(session, 'contextPressure')
+  } catch {
+    return undefined
+  }
+  if (state === null || typeof state !== 'object') return undefined
+  const record = state as { pressureTokens?: unknown; projectedTokens?: unknown; contextWindow?: unknown }
+
+  /*
+   * Same precedence as the UI: a projection that can be projected forward wins,
+   * because it answers "how full will the NEXT request be" — which is the
+   * question a handoff threshold is actually asking.
+   */
+  const projected = typeof record.projectedTokens === 'number' ? record.projectedTokens : undefined
+  const pressure = typeof record.pressureTokens === 'number' ? record.pressureTokens : undefined
+  const used = projected ?? pressure
+  if (used === undefined || !Number.isFinite(used) || used <= 0) return undefined
+
+  const window = typeof record.contextWindow === 'number' ? record.contextWindow : undefined
+  return {
+    used,
+    /*
+     * `pressureTokens` is a provider-reported prompt size, so the reading rests
+     * on real usage. `projectedTokens` adds a heuristic surface delta since
+     * that sample, which makes it an estimate — the same demotion the UI makes.
+     */
+    baseline: projected === undefined ? 'usage' : 'estimated',
+    ...(window === undefined ? {} : { window }),
+  }
 }
 
 /**
  * Read context occupancy for one session.
  *
- * `surfaceTokens` is the size of the model-visible surface. `contextWindow`
- * comes from the session's current request context, so switching to a model
- * with a smaller window changes the denominator immediately — which is the
- * behaviour a user expects: the new model really is closer to full.
+ * ## Why the projection comes first
+ *
+ * The composer's meter (`dsh-client-ui-conversation`) reads the
+ * `contextPressure` projection and computes `projected ?? pressureTokens` over
+ * `contextWindow`. This plugin used to price the surface by itself
+ * (`tokenMeter.measure().surfaceTokens`, a ~4-chars-per-token replay), so the
+ * two disagreed on the SAME session: 27% in the composer versus 32% in
+ * `/handoff status`, a gap that moves with how much Chinese and code the
+ * conversation holds.
+ *
+ * Two numbers describing one session is a defect regardless of which is more
+ * accurate: the user cannot tell whether a handoff is imminent. Reading the same
+ * projection the UI reads makes the plugin agree by construction, and keeps the
+ * provider-reported usage instead of discarding it for a guess.
+ *
+ * `contextWindow` still comes from the session's request context when the
+ * projection does not carry one, so switching to a model with a smaller window
+ * changes the denominator immediately.
  */
 export function readContextOccupancy(
   session: SessionLike | undefined,
   tokenMeter: TokenMeterLike | undefined,
+  projections?: SessionProjectionsLike,
 ): ContextOccupancy {
-  if (session === undefined || tokenMeter === undefined) return EMPTY_CONTEXT
+  if (session === undefined) return EMPTY_CONTEXT
 
-  let measured: { surfaceTokens?: number; baseline?: { kind?: string } }
-  try {
-    measured = tokenMeter.measure(session)
-  } catch (error) {
-    return {
-      ...EMPTY_CONTEXT,
-      quality: 'unavailable',
-      error: error instanceof Error ? error.message : String(error),
+  const fromProjection = readPressureProjection(session, projections)
+
+  let measured: { surfaceTokens?: number; baseline?: { kind?: string } } | undefined
+  if (fromProjection === undefined && tokenMeter !== undefined) {
+    try {
+      measured = tokenMeter.measure(session)
+    } catch (error) {
+      return {
+        ...EMPTY_CONTEXT,
+        quality: 'unavailable',
+        error: error instanceof Error ? error.message : String(error),
+      }
     }
+  } else if (fromProjection === undefined) {
+    // No projection and no meter: nothing can be measured on this deployment.
+    return EMPTY_CONTEXT
   }
 
-  const used = typeof measured.surfaceTokens === 'number' ? measured.surfaceTokens : 0
-  const baselineKind = measured.baseline?.kind ?? 'none'
+  const used =
+    fromProjection !== undefined
+      ? fromProjection.used
+      : typeof measured?.surfaceTokens === 'number'
+        ? measured.surfaceTokens
+        : 0
+
+  const baselineKind = fromProjection !== undefined ? fromProjection.baseline : (measured?.baseline?.kind ?? 'none')
   const baseline: ContextOccupancy['baseline'] =
     baselineKind === 'usage' || baselineKind === 'estimated' || baselineKind === 'none'
       ? baselineKind
       : 'none'
 
-  let window: number | undefined
-  try {
-    window = session.requestContext?.()?.contextWindow
-  } catch {
-    window = undefined
+  let window: number | undefined = fromProjection?.window
+  if (window === undefined) {
+    try {
+      window = session.requestContext?.()?.contextWindow
+    } catch {
+      window = undefined
+    }
   }
 
   /*
@@ -112,6 +196,7 @@ export function readContextOccupancy(
       quality: 'unavailable',
       window: usableWindow,
       baseline,
+      source: fromProjection === undefined ? 'meter-surface' : 'contextPressure',
     }
   }
 
@@ -121,6 +206,7 @@ export function readContextOccupancy(
     window: usableWindow,
     percent: usableWindow === undefined ? undefined : used / usableWindow,
     baseline,
+    source: fromProjection === undefined ? 'meter-surface' : 'contextPressure',
   }
 }
 

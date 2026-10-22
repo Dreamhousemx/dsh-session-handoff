@@ -77,6 +77,34 @@ describe('renderStatus', () => {
     expect(lines).toHaveLength(7)
   })
 
+  it('names the accessor so a disagreement is diagnosable', () => {
+    const fromProjection = renderStatus({
+      ...baseStatus,
+      occupancy: {
+        quality: 'exact',
+        used: 274_086,
+        window: 1_000_000,
+        percent: 0.274086,
+        source: 'contextPressure',
+      },
+    })
+    expect(fromProjection).toContain('27%')
+    expect(fromProjection).toContain('与输入框一致')
+
+    const fallback = renderStatus({
+      ...baseStatus,
+      occupancy: {
+        quality: 'estimated',
+        used: 321_382,
+        window: 1_000_000,
+        percent: 0.321382,
+        source: 'meter-surface',
+      },
+    })
+    expect(fallback).toContain('32%')
+    expect(fallback).toContain('回退：surface 估算')
+  })
+
   it('admits a missing context window instead of printing 0%', () => {
     const text = renderStatus({
       ...baseStatus,

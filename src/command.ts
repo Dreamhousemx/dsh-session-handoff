@@ -87,6 +87,8 @@ export function renderStatus(input: {
     used: number
     window?: number | undefined
     percent?: number | undefined
+    /** Which accessor produced the number; omitted by callers that do not care. */
+    source?: 'contextPressure' | 'meter-surface' | 'none' | undefined
   }
   cumulative: { tokens: number; source: string }
   thresholds: { handoffPercent: number; compactPercent: number; cumulative: number; enabled: boolean; compactEnabled: boolean }
@@ -104,6 +106,18 @@ export function renderStatus(input: {
   const window = occupancy.window === undefined ? '' : ` / ${occupancy.window}`
   const quality =
     occupancy.quality === 'exact' ? '精确' : occupancy.quality === 'estimated' ? '估算' : '不可用'
+  /*
+   * Name the accessor, so a future disagreement is diagnosable from the report
+   * itself. "上下文占用" used to be a surface replay while the composer divided
+   * the provider's reported pressure, and nothing in the line said which — 27%
+   * and 32% for the same session looked like a bug with no evidence to chase.
+   */
+  const source =
+    occupancy.source === 'contextPressure'
+      ? '与输入框一致'
+      : occupancy.source === 'meter-surface'
+        ? '回退：surface 估算'
+        : undefined
 
   const thresholdText = thresholds.enabled
     ? `占用率 ${thresholds.handoffPercent}%、累计 ${thresholds.cumulative} tokens`
@@ -113,7 +127,7 @@ export function renderStatus(input: {
   const lines = [
     '## 会话交接状态',
     `- 阶段：${input.phase}${input.busy ? '（进行中）' : ''}${input.latched ? ' · 已设停止闩锁' : ''}`,
-    `- 上下文占用：${occupancy.used}${window} tokens · ${percent} · ${quality}`,
+    `- 上下文占用：${occupancy.used}${window} tokens · ${percent} · ${quality}${source === undefined ? '' : ` · ${source}`}`,
     `- 累计消费：${cumulative.tokens} tokens（${cumulative.source === 'projection' ? '日志投影' : cumulative.source === 'meter' ? '估算' : '不可用'}）`,
     `- 自动交接阈值：${thresholdText}`,
     `- 自动压缩阈值：${compactText}`,

@@ -108,7 +108,12 @@ export class Monitor {
   occupancyOf(sessionId: string): ContextOccupancy {
     const row = this.rows.get(sessionId)
     if (row?.occupancy !== undefined) return row.occupancy
-    const measured = readContextOccupancy(this.deps.sessionOf(sessionId), this.deps.services().tokenMeter)
+    const services = this.deps.services()
+    const measured = readContextOccupancy(
+      this.deps.sessionOf(sessionId),
+      services.tokenMeter,
+      services.sessionProjections,
+    )
     return measured
   }
 
@@ -256,7 +261,11 @@ export class Monitor {
     if (!config.autoHandoffEnabled) return
 
     const services = this.deps.services()
-    const occupancy = readContextOccupancy(this.deps.sessionOf(sessionId), services.tokenMeter)
+    const occupancy = readContextOccupancy(
+      this.deps.sessionOf(sessionId),
+      services.tokenMeter,
+      services.sessionProjections,
+    )
     row.occupancy = occupancy
     const percent = occupancy.percent === undefined ? undefined : occupancy.percent * 100
     if (percent === undefined) return

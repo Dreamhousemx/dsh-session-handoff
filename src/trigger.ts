@@ -127,7 +127,7 @@ export function evaluate(
   if (now - state.lastEvaluatedAt < config.evaluateIntervalMs) return undefined
 
   // Past the cheap guards: pay for the measurement.
-  const occupancy = readContextOccupancy(session, deps.tokenMeter)
+  const occupancy = readContextOccupancy(session, deps.tokenMeter, deps.projections)
   const cumulative = readCumulativeUsage(session, deps.projections, deps.tokenMeter)
 
   state.lastEvaluatedSeq = seq

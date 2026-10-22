@@ -16,6 +16,119 @@ function meter(measured: unknown): TokenMeterLike {
   return { measure: () => measured as never }
 }
 
+/** A projections registry whose `contextPressure` unit answers `state`. */
+function pressure(state: unknown): { stateOf: (s: unknown, key: string) => unknown } {
+  return { stateOf: (_s, key) => (key === 'contextPressure' ? state : undefined) }
+}
+
+describe('readContextOccupancy — agreement with the composer meter', () => {
+  // The composer's ContextMeter computes `projectedTokens ?? pressureTokens`
+  // over `contextWindow`. The plugin used to price the surface itself, so the
+  // same session read 27% in the composer and 32% in `/handoff status`. These
+  // tests pin the projection-first rule that removes the disagreement.
+  const s = session({ requestContext: () => ({ contextWindow: 1_000_000 }) })
+
+  it('prefers projectedTokens over pressureTokens, like the UI', () => {
+    const result = readContextOccupancy(
+      s,
+      meter({ surfaceTokens: 999_999 }),
+      pressure({ pressureTokens: 274_086, projectedTokens: 280_000, contextWindow: 1_000_000 }),
+    )
+    expect(result.used).toBe(280_000)
+    expect(result.percent).toBeCloseTo(0.28)
+    expect(result.source).toBe('contextPressure')
+  })
+
+  it('falls back to pressureTokens when no projection is available', () => {
+    const result = readContextOccupancy(
+      s,
+      meter({ surfaceTokens: 999_999 }),
+      pressure({ pressureTokens: 274_086, contextWindow: 1_000_000 }),
+    )
+    expect(result.used).toBe(274_086)
+    // A provider-reported sample is exact, exactly as the UI treats it.
+    expect(result.baseline).toBe('usage')
+    expect(result.quality).toBe('exact')
+  })
+
+  it('marks a projected reading as estimated, not exact', () => {
+    const result = readContextOccupancy(
+      s,
+      undefined,
+      pressure({ pressureTokens: 274_086, projectedTokens: 280_000, contextWindow: 1_000_000 }),
+    )
+    expect(result.baseline).toBe('estimated')
+    expect(result.quality).toBe('estimated')
+  })
+
+  it('takes the window from the projection when the session reports none', () => {
+    const noWindow = session({})
+    const result = readContextOccupancy(
+      noWindow,
+      undefined,
+      pressure({ pressureTokens: 250_000, contextWindow: 1_000_000 }),
+    )
+    expect(result.window).toBe(1_000_000)
+    expect(result.percent).toBeCloseTo(0.25)
+  })
+
+  it('falls back to the meter when the unit is not registered', () => {
+    const result = readContextOccupancy(s, meter({ surfaceTokens: 170_000 }), pressure(undefined))
+    expect(result.used).toBe(170_000)
+    expect(result.source).toBe('meter-surface')
+  })
+
+  it('falls back to the meter when stateOf throws', () => {
+    const throwing = {
+      stateOf: () => {
+        throw new Error('projection not registered')
+      },
+    }
+    const result = readContextOccupancy(s, meter({ surfaceTokens: 170_000 }), throwing)
+    expect(result.used).toBe(170_000)
+    expect(result.source).toBe('meter-surface')
+  })
+
+  it('ignores a projection with no usable numerator', () => {
+    const result = readContextOccupancy(s, meter({ surfaceTokens: 170_000 }), pressure({ contextWindow: 1_000_000 }))
+    expect(result.used).toBe(170_000)
+    expect(result.source).toBe('meter-surface')
+  })
+
+  it('is unavailable when neither a projection nor a meter answers', () => {
+    const result = readContextOccupancy(s, undefined, pressure(undefined))
+    expect(result.quality).toBe('unavailable')
+    expect(result.source).toBe('none')
+  })
+
+  /*
+   * The real numbers from the session where this was reported: the composer
+   * showed 27% while `/handoff status` showed 32.14% for the SAME session.
+   *
+   * `pressureTokens` is the provider's reported prompt size (what the UI
+   * divides); `surfaceTokens` is this plugin's ~4-chars-per-token replay of the
+   * surface. Keeping this case makes the disagreement a fixed regression rather
+   * than something someone has to rediscover by eye.
+   */
+  it('reproduces the 27% vs 32% disagreement and shows it is gone', () => {
+    const live = session({ requestContext: () => ({ contextWindow: 1_000_000 }) })
+    const surfaceMeter = meter({
+      surfaceTokens: 321_382,
+      totalTokens: 274_919,
+      baseline: { kind: 'usage' },
+    })
+    const liveProjection = pressure({ pressureTokens: 274_086, contextWindow: 1_000_000 })
+
+    const before = readContextOccupancy(live, surfaceMeter)
+    expect(Math.round(before.percent! * 100)).toBe(32)
+    expect(before.source).toBe('meter-surface')
+
+    const after = readContextOccupancy(live, surfaceMeter, liveProjection)
+    expect(Math.round(after.percent! * 100)).toBe(27)
+    expect(after.source).toBe('contextPressure')
+  })
+})
+
 describe('readContextOccupancy', () => {
   it('divides surface tokens by the routed window', () => {
     const s = session({ requestContext: () => ({ contextWindow: 200_000 }) })
