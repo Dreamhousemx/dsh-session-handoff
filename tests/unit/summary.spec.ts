@@ -7,6 +7,7 @@ import {
   factsFromLog,
   narrativeIsUsable,
   parseNarrative,
+  readPendingInput,
   renderBrief,
   renderTranscript,
   sectionCoverage,
@@ -351,5 +352,164 @@ describe('renderTranscript', () => {
     const prompt = buildSummaryPrompt(f, renderTranscript(events))
     expect(prompt).toContain('[用户] 做一个交接插件')
     expect(prompt).toContain('不要写「未知」除非记录里确实没有线索')
+  })
+})
+
+/*
+ * "Waiting for the user" has no home in the nine sections, so it is detected
+ * instead of described. The raw `userQuestions` state shape is copied from
+ * `dsh-user-questions/lib/index.js`: the view lives under `state.questions`;
+ * each active entry is `{ callId, questions: [{ question, … }], state }`.
+ * Asking `stateOf()` for it returns the RAW state — never the wire view.
+ */
+describe('readPendingInput — is the outgoing session still waiting?', () => {
+  const anySession = { id: 's1' } as never
+
+  function projectionsWith(state: unknown) {
+    return {
+      stateOf: (_s: unknown, key: string) => (key === 'userQuestions' ? state : undefined),
+    } as never
+  }
+
+  it('reports an unanswered ask_user_question as a certain fact', () => {
+    const state = {
+      inheritedEventCount: 0,
+      timed: true,
+      questions: {
+        active: [
+          { callId: 'c1', state: 'open', questions: [{ question: '要现在改 measure.ts 吗？', id: 'q1' }] },
+        ],
+        settled: [],
+      },
+    }
+    const result = readPendingInput(anySession, projectionsWith(state))
+    expect(result?.kind).toBe('question')
+    expect(result?.detail).toContain('要现在改')
+  })
+
+  it('joins at most three outstanding questions', () => {
+    const state = {
+      questions: {
+        active: [
+          { callId: 'c1', state: 'open', questions: [{ question: 'A?' }] },
+          { callId: 'c2', state: 'open', questions: [{ question: 'B?' }] },
+          { callId: 'c3', state: 'open', questions: [{ question: 'C?' }] },
+          { callId: 'c4', state: 'open', questions: [{ question: 'D?' }] },
+        ],
+        settled: [],
+      },
+    }
+    const detail = readPendingInput(anySession, projectionsWith(state))?.detail ?? ''
+    expect(detail).toContain('A?')
+    expect(detail).toContain('C?')
+    expect(detail).not.toContain('D?')
+  })
+
+  it('falls back to the event log when the projection is absent', () => {
+    const events = [
+      { type: 'user/message', seq: 0 },
+      { type: 'assistant/message', seq: 1 },
+    ] as never
+    expect(readPendingInput(anySession, undefined, events)?.kind).toBe('unanswered-assistant')
+  })
+
+  it('says nothing when the user spoke last', () => {
+    const events = [
+      { type: 'assistant/message', seq: 0 },
+      { type: 'user/message', seq: 1 },
+    ] as never
+    expect(readPendingInput(anySession, undefined, events)).toBeUndefined()
+  })
+
+  it('says nothing when a tool result closed the exchange', () => {
+    const events = [
+      { type: 'assistant/message', seq: 0 },
+      { type: 'tool/result', seq: 1 },
+    ] as never
+    expect(readPendingInput(anySession, undefined, events)).toBeUndefined()
+  })
+
+  it('degrades to the event check when the projection throws', () => {
+    const throwing = {
+      stateOf: () => {
+        throw new Error('not registered')
+      },
+    } as never
+    const events = [{ type: 'assistant/message', seq: 0 }] as never
+    expect(readPendingInput(anySession, throwing, events)?.kind).toBe('unanswered-assistant')
+  })
+
+  it('ignores a malformed state instead of throwing', () => {
+    const malformed = { questions: { active: 'nope' } }
+    const events = [{ type: 'assistant/message', seq: 0 }] as never
+    expect(readPendingInput(anySession, projectionsWith(malformed), events)?.kind).toBe(
+      'unanswered-assistant',
+    )
+  })
+})
+
+describe('renderBrief — the pending-input line', () => {
+  function facts(overrides: Record<string, unknown> = {}) {
+    return {
+      cwd: '/w',
+      agentPreset: 'p',
+      provider: 'x',
+      model: 'y',
+      contextWindow: 1000,
+      permissionPreset: 'danger-full-access',
+      planMode: 'off',
+      occupancy: { quality: 'exact', used: 1, window: 1000, percent: 0.001, baseline: 'usage' },
+      cumulative: { quality: 'exact', tokens: 1, source: 'projection' },
+      turnCount: 1,
+      ...overrides,
+    } as never
+  }
+
+  it('states a recorded open question as a fact', () => {
+    const text = renderBrief({
+      facts: facts({ pendingInput: { kind: 'question', detail: '要改吗？' } }),
+      narrative: { goal: 'g' },
+      sourceSessionId: 's',
+      createdAt: 0,
+    }).text
+    expect(text).toContain('⚠ 未答复提问：要改吗？')
+    expect(text).not.toContain('可能仍在等用户回话')
+  })
+
+  /*
+   * The conditional wording is the point: "the assistant spoke last" does not
+   * prove it was asking. Asserting a pending decision from it would dress a
+   * guess as a measurement.
+   */
+  it('keeps the weaker case conditional, never asserting a pending decision', () => {
+    const text = renderBrief({
+      facts: facts({ pendingInput: { kind: 'unanswered-assistant' } }),
+      narrative: { goal: 'g' },
+      sourceSessionId: 's',
+      createdAt: 0,
+    }).text
+    expect(text).toContain('可能仍在等用户回话')
+    expect(text).toContain('交接不等于已经获得执行「下一步」的许可')
+    expect(text).not.toContain('未答复提问：')
+  })
+
+  it('adds no line at all when nothing is pending', () => {
+    const text = renderBrief({
+      facts: facts(),
+      narrative: { goal: 'g' },
+      sourceSessionId: 's',
+      createdAt: 0,
+    }).text
+    expect(text).not.toContain('⚠')
+  })
+
+  it('carries the do-not-decide clause for the receiving model', () => {
+    const text = renderBrief({
+      facts: facts(),
+      narrative: { goal: 'g' },
+      sourceSessionId: 's',
+      createdAt: 0,
+    }).text
+    expect(text).toContain('不要替用户做这个决定')
   })
 })

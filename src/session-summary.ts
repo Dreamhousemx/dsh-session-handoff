@@ -22,7 +22,12 @@
  */
 import { foldUsageFromEvents, percentOf, type ContextOccupancy, type CumulativeUsage } from './measure.ts'
 import { redactWithReport } from './redaction.ts'
-import type { SessionEventLike, SessionLike } from './contracts.ts'
+import {
+  sessionEvents,
+  type SessionEventLike,
+  type SessionLike,
+  type SessionProjectionsLike,
+} from './contracts.ts'
 
 /** The nine sections, in order, with the prompt wording for each. */
 export const BRIEF_SECTIONS = [
@@ -38,6 +43,27 @@ export const BRIEF_SECTIONS = [
 ] as const
 
 export type BriefSectionKey = (typeof BRIEF_SECTIONS)[number]['key']
+
+/**
+ * Evidence that the outgoing session may not have been finished talking.
+ *
+ * The nine sections have no place for "waiting for the user", so an unresolved
+ * question survives a handoff only by luck. This is the program-side answer:
+ * something a successor must be told regardless of what the model wrote.
+ */
+export interface PendingInput {
+  /**
+   * `question` — the host still holds an unanswered `ask_user_question` call.
+   * Certain: it comes from the durable `userQuestions` projection.
+   *
+   * `unanswered-assistant` — the last surface event is an assistant message
+   * with nothing after it. Suggestive only: it says the assistant spoke last,
+   * not that it was asking. Wording must stay conditional.
+   */
+  readonly kind: 'question' | 'unanswered-assistant'
+  /** The outstanding question texts, when the host recorded them. */
+  readonly detail?: string
+}
 
 /** Facts about the outgoing session, read by the plugin rather than the model. */
 export interface SessionFacts {
@@ -59,6 +85,13 @@ export interface SessionFacts {
   readonly occupancy: ContextOccupancy
   readonly cumulative: CumulativeUsage
   readonly turnCount: number
+  /**
+   * Set when the session appears to have been waiting for the user.
+   *
+   * Program-observed, not model-authored: it is rendered into the facts block,
+   * which the brief tells the receiving model not to rewrite.
+   */
+  readonly pendingInput?: PendingInput
 }
 
 /** Narrative the model produced, already split by section. */
@@ -114,7 +147,78 @@ function safely<T>(read: () => T | undefined): T | undefined {
   }
 }
 
-/** The prompt sent to the outgoing model. Every section name is explicit. */
+/**
+ * Decide whether the outgoing session looks like it was waiting for the user.
+ *
+ * Two sources, most certain first:
+ *
+ * 1. **The `userQuestions` projection.** When the session asked through the
+ *    host's own `ask_user_question` tool, the durable projection still lists
+ *    the call as active until an answer batch settles it. That is a fact, not a
+ *    guess. Raw state shape (`dsh-user-questions/lib/index.js`): the view lives
+ *    under `state.questions`, itself `{ active, settled }`, and each active
+ *    entry is `{ callId, questions: [{ question, header?, … }], state }`.
+ * 2. **The last surface event.** When it is an `assistant/message` and nothing
+ *    followed, the assistant spoke last — which may mean it asked a plain-text
+ *    question. This is suggestive only, so the brief says "可能".
+ *
+ * Every read is contained: a projection that is absent, throws, or has an
+ * unexpected shape must degrade to the event check rather than fail the
+ * handoff. A handoff is more valuable than this annotation.
+ */
+export function readPendingInput(
+  session: SessionLike | undefined,
+  projections: SessionProjectionsLike | undefined,
+  events?: readonly SessionEventLike[] | undefined,
+): PendingInput | undefined {
+  const fromProjection = readOpenQuestions(session, projections)
+  if (fromProjection !== undefined) return fromProjection
+
+  const list = events ?? sessionEvents(session)
+  // Walk backwards: the newest surface event decides how the session ended.
+  for (let index = list.length - 1; index >= 0; index -= 1) {
+    const event = list[index]
+    if (event === undefined) continue
+    if (event.type === 'user/message' || event.type === 'tool/result') return undefined
+    if (event.type === 'assistant/message') return { kind: 'unanswered-assistant' }
+  }
+  return undefined
+}
+
+/** Read the host's unanswered-question list, tolerating any malformation. */
+function readOpenQuestions(
+  session: SessionLike | undefined,
+  projections: SessionProjectionsLike | undefined,
+): PendingInput | undefined {
+  if (session === undefined || projections === undefined) return undefined
+  let state: unknown
+  try {
+    state = projections.stateOf(session, 'userQuestions')
+  } catch {
+    return undefined
+  }
+  if (state === null || typeof state !== 'object') return undefined
+
+  const questions = (state as { questions?: unknown }).questions
+  if (questions === null || typeof questions !== 'object') return undefined
+  const active = (questions as { active?: unknown }).active
+  if (!Array.isArray(active) || active.length === 0) return undefined
+
+  const texts: string[] = []
+  for (const entry of active) {
+    if (entry === null || typeof entry !== 'object') continue
+    const asked = (entry as { questions?: unknown }).questions
+    if (!Array.isArray(asked)) continue
+    for (const question of asked) {
+      if (question === null || typeof question !== 'object') continue
+      const text = (question as { question?: unknown }).question
+      if (typeof text === 'string' && text.trim().length > 0) texts.push(text.trim())
+    }
+  }
+  const detail = texts.slice(0, 3).join(' / ')
+  return { kind: 'question', ...(detail.length === 0 ? {} : { detail }) }
+}
+
 /**
  * Render the conversation itself into the prompt.
  *
@@ -329,6 +433,24 @@ function permissionLine(facts: SessionFacts): string {
   return '未知'
 }
 
+/**
+ * One facts-block line describing a possibly-unanswered input.
+ *
+ * The two cases carry different certainty, so they carry different wording. A
+ * recorded open question is a fact and is stated as one; "the assistant spoke
+ * last" only suggests the session was waiting, and asserting a pending decision
+ * from it would be a guess dressed as a measurement — the exact failure this
+ * plugin is meant to avoid.
+ */
+function pendingInputLine(pending: PendingInput): string {
+  if (pending.kind === 'question') {
+    const detail = pending.detail ?? '（问题内容未记录）'
+    return `- ⚠ 未答复提问：${detail}（程序检测：原会话结束时系统仍登记该提问为未答复）`
+  }
+  return '- ⚠ 原会话末尾：最后一条是助手发言，其后没有用户消息——可能仍在等用户回话，'
+    + '交接不等于已经获得执行「下一步」的许可'
+}
+
 /** Render the final brief, including the redaction report. */
 export function renderBrief(input: {
   facts: SessionFacts
@@ -364,6 +486,7 @@ export function renderBrief(input: {
       facts.cumulative.source === 'projection' ? '日志投影' : facts.cumulative.source === 'meter' ? '估算' : '不可用'
     }）`,
     `- 已完成 turn：${facts.turnCount}`,
+    ...(facts.pendingInput === undefined ? [] : [pendingInputLine(facts.pendingInput)]),
     `- 原会话：${input.sourceSessionId}`,
     `- 生成时间：${new Date(input.createdAt).toISOString()}`,
   ].join('\n')
@@ -380,6 +503,19 @@ export function renderBrief(input: {
     '2. 复查本插件（`dsh-session-handoff/`）：重点看交接链路——度量、触发、软终止、简报、',
     '   会话迁移与配置继承、归档——有没有与宿主 API 不符、静默降级或逻辑缺口。',
     '   有发现就列出来并说明证据；没有发现就说「未发现问题」，不要编造。',
+    '',
+    /*
+     * The contract half of "do not decide for the user".
+     *
+     * A brief reads like a work order, and the line above tells the successor
+     * to continue from 「下一步」. None of the nine sections has a slot for
+     * "waiting for the user", so an unresolved question survives only if the
+     * outgoing model happened to phrase it as a constraint. The mechanism half
+     * (`readPendingInput`) detects the likely case, but no program can know
+     * what the model meant — so the expectation is stated here as well.
+     */
+    '**另外：** 若「约束」「当前进度」「下一步」任一处表示需要用户确认、待批准或等待用户决定，',
+    '先把该事项连同你的建议讲清楚并向用户提问，得到答复后再动手；不要替用户做这个决定。',
     '',
     '## 会话事实',
     factsBlock,
