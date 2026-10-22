@@ -75,20 +75,42 @@ export interface SessionLike {
 }
 
 /**
- * The durable events of one session, whichever accessor this host build has.
+ * The COMPLETE durable log of one session, inherited history included.
  *
- * Kept in one place so "how do I read the log" has a single answer rather than
- * three subtly different guesses.
+ * ## Why `snapshotEvents` comes first, and `ownEvents` is not the default
+ *
+ * The host's two accessors differ in what they cover:
+ *
+ *     ownEvents()      { return this.snapshotEvents(this.inheritedEventCount) }
+ *     snapshotEvents() { return the whole log }
+ *
+ * (`dsh-session/lib/index.js`.) A session forked from another therefore has
+ * `inheritedEventCount > 0`, and `ownEvents()` reports only what it did itself —
+ * the inherited prefix is invisible.
+ *
+ * Reading `ownEvents` first made every question about the conversation answer
+ * for a fragment:
+ *
+ * - `activityCheck` saw no `user/message` or `turn/start` in a fork whose whole
+ *   history was inherited, called it blank, and refused the handoff with
+ *   "当前没有可迁移的活动会话" — a rejection that looks like a bug.
+ * - The brief was written from the fragment, so inherited work vanished from it.
+ * - `windowFromEvents` could not find the `request/context` that established
+ *   the model, so occupancy was reported as unmeasurable.
+ *
+ * Everything this plugin does is about "the conversation", so the default is
+ * the whole log. `ownSessionEvents` exists for the one case that genuinely wants
+ * the session's own share.
  */
 export function sessionEvents(session: SessionLike | undefined): readonly SessionEventLike[] {
   if (session === undefined) return []
   try {
-    if (typeof session.ownEvents === 'function') {
-      const events = session.ownEvents()
-      if (Array.isArray(events)) return events
-    }
     if (typeof session.snapshotEvents === 'function') {
       const events = session.snapshotEvents()
+      if (Array.isArray(events)) return events
+    }
+    if (typeof session.ownEvents === 'function') {
+      const events = session.ownEvents()
       if (Array.isArray(events)) return events
     }
   } catch {
@@ -96,6 +118,27 @@ export function sessionEvents(session: SessionLike | undefined): readonly Sessio
     // as "blank session" rather than as a crash.
   }
   return []
+}
+
+/**
+ * Only the events this session itself appended, excluding inherited history.
+ *
+ * Prefers `ownEvents()`; when the host has no such accessor the whole log is
+ * returned, because a superset is a safer answer than none — a caller using
+ * this to count "what this session did" would over-count after a fork, which
+ * the callers here accept.
+ */
+export function ownSessionEvents(session: SessionLike | undefined): readonly SessionEventLike[] {
+  if (session === undefined) return []
+  try {
+    if (typeof session.ownEvents === 'function') {
+      const events = session.ownEvents()
+      if (Array.isArray(events)) return events
+    }
+  } catch {
+    // Fall through to the whole log rather than reporting nothing.
+  }
+  return sessionEvents(session)
 }
 
 /** Immutable session metadata inherited across a handoff. */

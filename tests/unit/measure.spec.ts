@@ -6,7 +6,13 @@ import {
   readCumulativeUsage,
   windowFromEvents,
 } from '@src/measure.ts'
-import { sessionEvents, type SessionEventLike, type SessionLike, type TokenMeterLike } from '@src/contracts.ts'
+import {
+  ownSessionEvents,
+  sessionEvents,
+  type SessionEventLike,
+  type SessionLike,
+  type TokenMeterLike,
+} from '@src/contracts.ts'
 
 function session(overrides: Partial<SessionLike> = {}): SessionLike {
   return { id: 's1', ...overrides }
@@ -427,5 +433,58 @@ describe('windowFromEvents', () => {
       snapshotEvents: () => [{ type: 'user/message', seq: 1, data: {} }],
     })
     expect(sessionEvents(host).length).toBe(1)
+  })
+})
+
+/*
+ * Fork sessions: the inherited prefix must be visible.
+ *
+ * The host's two accessors differ:  ownEvents()      = snapshotEvents(inheritedEventCount)
+ *                                  snapshotEvents()  = the whole log
+ * (`dsh-session/lib/index.js`), so for a fork `ownEvents` hides everything the
+ * parent contributed. Reading it first made `activityCheck` judge a fork blank
+ * and refuse the handoff, made the brief omit inherited work, and hid the
+ * `request/context` event that carries the window.
+ */
+describe('sessionEvents — a fork is the whole conversation, not its own share', () => {
+  const inherited = [
+    { type: 'turn/start', seq: 0, data: {} },
+    { type: 'user/message', seq: 1, data: {} },
+    { type: 'request/context', seq: 2, data: { contextWindow: 500_000 } },
+  ]
+  const own = [
+    { type: 'turn/start', seq: 3, data: {} },
+    { type: 'assistant/message', seq: 4, data: {} },
+  ]
+
+  const fork = {
+    id: 's-fork',
+    // The host's real definitions, including the offset that hides the prefix.
+    snapshotEvents: () => [...inherited, ...own],
+    ownEvents: () => [...own],
+  } as never
+
+  it('reads the whole log, so inherited history is visible', () => {
+    expect(sessionEvents(fork)).toHaveLength(5)
+  })
+
+  it('still offers the session-own slice when a caller wants it', () => {
+    expect(ownSessionEvents(fork)).toEqual(own)
+  })
+
+  it('finds the window recorded before the fork', () => {
+    expect(windowFromEvents(sessionEvents(fork))).toBe(500_000)
+  })
+
+  it('does not call a fork blank', () => {
+    const hasActivity = sessionEvents(fork).some(
+      (event) => event.type === 'user/message' || event.type === 'turn/start',
+    )
+    expect(hasActivity).toBe(true)
+  })
+
+  it('degrades to ownEvents when the host has no snapshotEvents', () => {
+    const partial = { id: 's', ownEvents: () => [...own] } as never
+    expect(sessionEvents(partial)).toEqual(own)
   })
 })
