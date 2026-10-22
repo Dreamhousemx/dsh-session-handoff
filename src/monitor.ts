@@ -237,7 +237,18 @@ export class Monitor {
     // no session to read its configuration from.
     const result = await this.deps.runAction(request)
     const succeeded = result.phase === 'completed'
-    this.settle(sessionId, kind, succeeded)
+    /*
+     * A compaction that failed has already exhausted its retries, so it must
+     * spend one of the session's automatic actions. Otherwise `pending` clears,
+     * the next surface event re-judges the still-full context, and a compaction
+     * that can never succeed retries every `evaluateIntervalMs` for the rest of
+     * the session's life — never reaching `maxAutoActionsPerSession`.
+     *
+     * A failed HANDOFF deliberately does not count: it is the case a user
+     * retries, and burning the cap on it would strand the session with no
+     * automatic escape hatch.
+     */
+    this.settle(sessionId, kind, succeeded, kind === 'compact' && !succeeded)
     this.deps.onAutoAction?.(sessionId, kind, succeeded)
     // After a compaction the context may still be too full: re-judge at once
     // rather than waiting for the next event, because a compaction that did not
@@ -286,22 +297,37 @@ export class Monitor {
 /**
  * Build the compaction runner for the coordinator.
  *
- * Kept next to the monitor because it needs the same two facts: the service and
- * the loop latch.
+ * Both inputs come from the caller rather than from this module:
+ *
+ * - `signal` is the action's hard deadline. It used to be a controller created
+ *   once here and never aborted, so a hung compaction outlived
+ *   `actionDeadlineMs` and kept the latch armed.
+ * - `interruptedRunningTurn` must be decided BEFORE the coordinator arms the
+ *   latch. Asking `latches.isLatched()` here — as this function used to —
+ *   always answered `true`, because the only latch present was the one the
+ *   compaction had just set. Every automatic compaction therefore woke an idle
+ *   session with "continue", the loop `compact-handler.ts` warns about.
+ *
+ * The latch registry is deliberately not a dependency any more: nothing in this
+ * module may read the latch to answer a question the coordinator owns.
  */
 export function compactRunner(deps: {
   services: () => HostServices
-  latches: LatchRegistry
   waitIdle: (agent: AgentLike) => Promise<void>
-  signal: AbortSignal
   sleep?: (ms: number) => Promise<void>
-}): (agent: AgentLike) => Promise<CompactOutcome> {
-  return (agent) =>
+}): (
+  agent: AgentLike,
+  options: { signal?: AbortSignal; interruptedRunningTurn: boolean },
+) => Promise<CompactOutcome> {
+  return (agent, options) =>
     compact(agent, {
       compaction: deps.services().compaction,
       waitIdle: deps.waitIdle,
-      signal: deps.signal,
-      interruptedRunningTurn: deps.latches.isLatched(agent.id),
+      // A missing deadline is not a reason to refuse: use a signal that is
+      // never aborted, which is exactly the old behaviour for callers that do
+      // not supply one.
+      signal: options.signal ?? new AbortController().signal,
+      interruptedRunningTurn: options.interruptedRunningTurn,
       ...(deps.sleep === undefined ? {} : { sleep: deps.sleep }),
     })
 }

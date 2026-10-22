@@ -148,6 +148,6 @@ declare function apply(ctx: Context, config: Config): void;
 declare function requestNarrative(llm: LlmLike, prompt: string, maxTokens: number, route: {
   provider: string;
   model: string;
-}): Promise<BriefNarrative>;
+}, signal?: AbortSignal): Promise<BriefNarrative>;
 //#endregion
 export { CONFIG_DEFAULTS, Config, ROUTE_PREFIX, SETTINGS_ENTRY, apply, inject, name, requestNarrative, withDefaults };

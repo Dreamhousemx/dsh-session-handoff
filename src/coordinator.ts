@@ -33,12 +33,37 @@ import type { ActionResult, FailureRecord, Phase } from './types.ts'
 /** The steps the coordinator delegates; each is injected so it stays testable. */
 export interface CoordinatorDeps {
   readonly latches: LatchRegistry
-  /** Build and render the brief; throwing means "abort, keep the session". */
-  readonly summarize: (agent: AgentLike) => Promise<{ brief: string; redactions: readonly string[] }>
+  /**
+   * Build and render the brief; throwing means "abort, keep the session".
+   *
+   * `signal` is the action's hard deadline. It must reach the model call:
+   * without it a summarization that never answers leaves the latch armed and
+   * the session unable to start its next step, because `run()`'s `finally`
+   * never runs. Optional so a test may ignore it.
+   */
+  readonly summarize: (
+    agent: AgentLike,
+    signal?: AbortSignal,
+  ) => Promise<{ brief: string; redactions: readonly string[] }>
   /** Create the new session and inherit; must not throw for ordinary failures. */
   readonly migrate: (brief: string) => Promise<ActionResult>
-  /** Run a compaction; only used by the compact action. */
-  readonly compact: (agent: AgentLike) => Promise<CompactOutcome>
+  /**
+   * Run a compaction; only used by the compact action.
+   *
+   * Two facts must come from the CALLER, not from the compaction service:
+   *
+   * - `signal` — the action's hard deadline, for the same reason as above.
+   * - `interruptedRunningTurn` — whether a turn was actually running when this
+   *   started. The compaction runner used to ask the latch registry at call
+   *   time, but the coordinator arms the latch BEFORE compacting, so that
+   *   answer was always `true` and every automatic compaction woke an idle
+   *   session with "continue". The coordinator knows the real value: it reads
+   *   `agent.status` before arming the latch.
+   */
+  readonly compact: (
+    agent: AgentLike,
+    options: { signal?: AbortSignal; interruptedRunningTurn: boolean },
+  ) => Promise<CompactOutcome>
   /** Wait for idle; injected so tests need not sleep. */
   readonly waitIdle: (agent: AgentLike) => Promise<void>
   /** Deliver a human message that arrived mid-flight to the new session. */
@@ -291,7 +316,11 @@ export class Coordinator {
     let brief: string
     let redactions: readonly string[]
     try {
-      const summary = await this.deps.summarize(agent as AgentLike)
+      const summary = await boundedByDeadline(
+        (signal) => this.deps.summarize(agent as AgentLike, signal),
+        deadlineSignal,
+        () => new Error('生成交接简报超时，已放弃本次交接并保留原会话'),
+      )
       brief = summary.brief
       redactions = summary.redactions
     } catch (error) {
@@ -455,7 +484,22 @@ export class Coordinator {
     }
 
     run.phase = 'preparing'
-    const interrupted = this.deps.latches.get(sessionId) !== undefined
+    /*
+     * Was a turn actually running when this compaction was requested?
+     *
+     * Read BEFORE arming the latch, and read from the agent itself: the latch
+     * registry cannot answer this. A latch is only present when some earlier
+     * action left one behind, so `latches.isLatched()` is false both for an
+     * idle session (nothing to continue) and for a running one (nobody armed
+     * it) — the two cases this question must distinguish. `agent.status` is the
+     * host's own answer (`dsh-agent-loop/lib/index.js`: `idle` while the phase
+     * is `idle` or `maintenance`, otherwise `running`).
+     *
+     * The compaction runner used to ask the registry at call time, after the
+     * latch it had just set was in place, so it always saw `true` and every
+     * automatic compaction injected "continue" into an idle session.
+     */
+    const interrupted = agent.status === 'running'
     this.deps.latches.arm(sessionId)
 
     run.phase = 'waiting-for-step-boundary'
@@ -473,7 +517,24 @@ export class Coordinator {
     }
 
     run.phase = 'waiting-for-compact'
-    const outcome = await this.deps.compact(agent)
+    let outcome: CompactOutcome
+    try {
+      outcome = await boundedByDeadline(
+        (signal) =>
+          this.deps.compact(agent, {
+            signal,
+            interruptedRunningTurn: interrupted,
+          }),
+        deadlineSignal,
+        () => new Error('压缩超时，已释放闩锁'),
+      )
+    } catch (error) {
+      return this.fail(
+        sessionId,
+        run,
+        `压缩未能在截止时间内完成，已释放闩锁，原会话可继续：${messageOf(error)}`,
+      )
+    }
 
     if (run.cancelRequested) return this.cancelled(sessionId, run, '已按请求取消压缩。')
 
@@ -585,6 +646,55 @@ export class Coordinator {
     this.deps.log?.(`handoff: ${sessionId} → ${result.phase}`)
     return result
   }
+}
+
+/**
+ * A deadline that aborts the in-flight await without touching the session.
+ *
+ * Expiry only settles the wait: the caller's `finally` releases the latch and
+ * the session continues with whatever it was doing. Nothing is cancelled.
+ */
+/**
+ * Run one delegated step no longer than the action's deadline.
+ *
+ * Passing the signal is necessary but not sufficient. A signal can only stop
+ * work that listens for it, and the two expensive steps here end in third-party
+ * code — `llm.stream` inside the summariser, `compaction.compactNow` inside the
+ * compaction engine. If such a call never settles and never observes the
+ * signal, `await` hangs for good, `run()`'s `finally` never releases the latch,
+ * and the session can never start its next step again.
+ *
+ * So the deadline is also enforced HERE, on the caller's own promise. The
+ * abandoned call keeps running in the background — that leak is unavoidable —
+ * but the session is freed, which is the outcome that matters. The abort is
+ * fired first so a cooperating callee has a chance to stop.
+ *
+ * @param run - the step, given the deadline signal.
+ * @param signal - the action's deadline signal.
+ * @param timeoutError - the error a timeout rejects with.
+ */
+function boundedByDeadline<T>(
+  run: (signal: AbortSignal) => Promise<T>,
+  signal: AbortSignal,
+  timeoutError: () => Error,
+): Promise<T> {
+  const operation = Promise.resolve().then(() => run(signal))
+  if (signal.aborted) return operation
+
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(timeoutError())
+    signal.addEventListener('abort', onAbort, { once: true })
+    operation.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 /**

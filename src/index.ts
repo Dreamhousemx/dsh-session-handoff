@@ -42,6 +42,7 @@ import {
   buildSummaryPrompt,
   narrativeIsUsable,
   parseNarrative,
+  readPendingInput,
   readSessionFacts,
   renderBrief,
   renderTranscript,
@@ -169,6 +170,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
   /** Ask the outgoing model to write the nine sections. */
   const summarize = async (
     agent: AgentLike,
+    signal?: AbortSignal,
   ): Promise<{ brief: string; redactions: readonly string[] }> => {
     const services = readServices(host)
     const session = agent.session
@@ -181,6 +183,16 @@ export function apply(ctx: Context, config: ConfigShape): void {
       events,
     })
     facts = withObservedServices(facts, services, agent)
+    /*
+     * Did the session end while waiting for the user?
+     *
+     * Set here rather than inside `readSessionFacts` because it needs the
+     * projections service. Kept as a spread so the fields
+     * `withObservedServices` already filled (permission preset, plan mode)
+     * survive — rebuilding the object would silently reset them.
+     */
+    const pendingInput = readPendingInput(session, services.sessionProjections, events)
+    if (pendingInput !== undefined) facts = { ...facts, pendingInput }
 
     if (services.llm === undefined) {
       throw new Error('当前部署没有 llm 服务，无法生成交接简报')
@@ -214,6 +226,7 @@ export function apply(ctx: Context, config: ConfigShape): void {
       buildSummaryPrompt(facts, renderTranscript(events)),
       live.summaryMaxTokens,
       route,
+      signal,
     )
 
     if (!narrativeIsUsable(narrative)) {
@@ -258,11 +271,9 @@ export function apply(ctx: Context, config: ConfigShape): void {
     summarize,
     compact: compactRunner({
       services: () => readServices(host),
-      latches,
       waitIdle: async (agent) => {
         if (typeof agent.whenIdle === 'function') await agent.whenIdle()
       },
-      signal: new AbortController().signal,
     }),
     migrate: async (brief) => migrateFor(brief, host, agentOf, sessionOf),
     /*
@@ -825,6 +836,7 @@ export async function requestNarrative(
   prompt: string,
   maxTokens: number,
   route: { provider: string; model: string },
+  signal?: AbortSignal,
 ): Promise<BriefNarrative> {
   const stream = llm.stream
   if (typeof stream !== 'function') {
@@ -836,6 +848,13 @@ export async function requestNarrative(
     model: route.model,
     messages: [{ role: 'user', content: [{ type: 'text', text: prompt }] }],
     maxTokens,
+    /*
+     * The action's deadline must reach the adapter. Without it a request that
+     * never answers keeps `summarize` pending past `actionDeadlineMs`, so
+     * `run()`'s `finally` never releases the latch and the session cannot
+     * start its next step. `LlmStreamOptionsLike` already declares `signal`.
+     */
+    ...(signal === undefined ? {} : { signal }),
   })
 
   let text = ''
@@ -853,6 +872,9 @@ export async function requestNarrative(
     }
   }
 
+  if (signal?.aborted === true && text.trim().length === 0) {
+    throw new Error('生成交接简报超时，已放弃本次交接')
+  }
   if (failure !== undefined) throw new Error(`模型调用失败：${failure}`)
   return parseNarrative(text)
 }

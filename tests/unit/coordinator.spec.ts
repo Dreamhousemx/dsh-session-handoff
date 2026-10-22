@@ -370,6 +370,103 @@ describe('Coordinator — compaction', () => {
   })
 })
 
+/*
+ * Wiring, not behaviour-on-a-literal.
+ *
+ * Every case above injects `continuesTask` as a literal, which is exactly how
+ * the "always continue" defect survived: the coordinator's answer was right and
+ * the plumbing was wrong. These cases drive the real decision through
+ * `interruptedRunningTurn`, so the seam between "was a turn running" and
+ * "should we say continue" is covered.
+ */
+describe('Coordinator — interruptedRunningTurn is decided before the latch', () => {
+  function recordingDeps(overrides: Partial<CoordinatorDeps> = {}) {
+    const seen: Array<{ interruptedRunningTurn: boolean; signal: AbortSignal | undefined }> = []
+    const d = deps({
+      compact: async (_agent, options) => {
+        seen.push({
+          interruptedRunningTurn: options.interruptedRunningTurn,
+          signal: options.signal,
+        })
+        // Mirrors compact-handler: the outcome echoes the caller's answer.
+        return { kind: 'compacted', continuesTask: options.interruptedRunningTurn }
+      },
+      ...overrides,
+    })
+    return { d, seen }
+  }
+
+  it('says "not interrupted" for an idle agent, so no continue is injected', async () => {
+    const followup = vi.fn(async () => {})
+    const agent: AgentLike = { id: 's1', status: 'idle', whenIdle: () => Promise.resolve(), followup }
+    const { d, seen } = recordingDeps()
+
+    const result = await new Coordinator(d).run({
+      sessionId: 's1',
+      agent,
+      kind: 'compact',
+      reason: 'context',
+      automatic: true,
+    })
+
+    expect(seen).toHaveLength(1)
+    /*
+     * The regression guard: this must be false. The old runner asked the latch
+     * registry at call time, by which point the coordinator had already armed
+     * it, so the value here was always true and an idle session was woken.
+     */
+    expect(seen[0]!.interruptedRunningTurn).toBe(false)
+    expect(followup).not.toHaveBeenCalled()
+    expect(result.text).toContain('原本空闲')
+  })
+
+  it('says "interrupted" for a running agent and injects "continue"', async () => {
+    const followup = vi.fn(async () => {})
+    const agent: AgentLike = { id: 's1', status: 'running', whenIdle: () => Promise.resolve(), followup }
+    const { d, seen } = recordingDeps()
+
+    await new Coordinator(d).run({
+      sessionId: 's1',
+      agent,
+      kind: 'compact',
+      reason: 'context',
+      automatic: true,
+    })
+
+    expect(seen[0]!.interruptedRunningTurn).toBe(true)
+    expect(followup).toHaveBeenCalledWith(
+      expect.objectContaining({ content: [{ type: 'text', text: '继续完成刚才的任务。' }] }),
+      expect.anything(),
+    )
+  })
+
+  it('passes the action deadline to the compaction', async () => {
+    const { d, seen } = recordingDeps()
+    d.latches.arm // keep the reference explicit: the latch is armed inside run()
+    await new Coordinator(d).run({
+      sessionId: 's1',
+      agent: { id: 's1', status: 'running', whenIdle: () => Promise.resolve() },
+      kind: 'compact',
+      reason: 'context',
+      automatic: true,
+    })
+    expect(seen[0]!.signal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('leaves the latch released after a compaction', async () => {
+    const d = recordingDeps().d
+    const coordinator = new Coordinator(d)
+    await coordinator.run({
+      sessionId: 's1',
+      agent: { id: 's1', status: 'idle', whenIdle: () => Promise.resolve() },
+      kind: 'compact',
+      reason: 'context',
+      automatic: true,
+    })
+    expect(d.latches.isLatched('s1')).toBe(false)
+  })
+})
+
 describe('Coordinator — cleanup', () => {
   it('forgets a session that was disposed but keeps its new-session pointer', async () => {
     const coordinator = new Coordinator(deps())
@@ -487,5 +584,48 @@ describe('injected message shape', () => {
     expect(message.source.kind).not.toBe('plugin')
     expect(message.source.kind).toMatch(/^plugin:[a-z0-9][a-z0-9._-]*$/)
     expect(Array.isArray(message.content)).toBe(true)
+  })
+})
+
+/*
+ * The deadline must free the session even when the delegated call ignores it.
+ *
+ * Passing a signal only helps a callee that listens. Both expensive steps end
+ * in third-party code (`llm.stream`, `compaction.compactNow`); if such a call
+ * never settles, a plain `await` hangs for ever and `run()`'s `finally` never
+ * releases the latch — the session can never start its next step again. The
+ * deadline is therefore enforced on the caller's own promise as well.
+ */
+describe('Coordinator — the deadline is enforced, not merely offered', () => {
+  const never = () => new Promise<never>(() => {})
+
+  it('fails a handoff whose summarizer never settles, and releases the latch', async () => {
+    const d = deps({ summarize: never })
+    const coordinator = new Coordinator(d)
+    coordinator.configure({ stepWaitMs: 5000, actionDeadlineMs: 120 })
+
+    const result = await coordinator.run(handoff(idleAgent()))
+    expect(result.ok).toBe(false)
+    expect(result.phase).toBe('failed')
+    expect(result.text).toContain('超时')
+    expect(d.latches.isLatched('s1')).toBe(false)
+  })
+
+  it('fails a compaction whose engine never settles, and releases the latch', async () => {
+    const d = deps({ compact: never as never })
+    const coordinator = new Coordinator(d)
+    coordinator.configure({ stepWaitMs: 5000, actionDeadlineMs: 120 })
+
+    const result = await coordinator.run({
+      sessionId: 's1',
+      agent: { id: 's1', status: 'idle', whenIdle: () => Promise.resolve() },
+      kind: 'compact',
+      reason: 'context',
+      automatic: true,
+    })
+
+    expect(result.phase).toBe('failed')
+    expect(result.text).toContain('超时')
+    expect(d.latches.isLatched('s1')).toBe(false)
   })
 })

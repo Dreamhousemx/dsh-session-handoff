@@ -142,3 +142,55 @@ describe('Monitor — automatic execution', () => {
     expect(runAction).not.toHaveBeenCalled()
   })
 })
+
+/*
+ * A compaction that fails has already exhausted its own retries, so it must
+ * spend one of the session's automatic actions. Without that, `pending` clears,
+ * the next surface event re-judges the still-full context, and a compaction
+ * that can never succeed retries every `evaluateIntervalMs` forever — never
+ * reaching `maxAutoActionsPerSession`.
+ *
+ * A failed HANDOFF must NOT spend one: it is the case a user retries, and
+ * burning the cap would strand the session with no automatic escape hatch.
+ */
+describe('Monitor — a failed compaction spends the per-session budget', () => {
+  const failed = async () =>
+    ({ ok: false, phase: 'failed' as const, text: '压缩失败', error: 'summary' }) as ActionResult
+
+  it('counts a failed compaction as a consumed action', async () => {
+    const { monitor } = makeMonitor({ runAction: failed })
+    monitor.markPending('s1')
+    monitor.settle('s1', 'compact', false, true)
+    expect(monitor.autoActionsOf('s1')).toBe(1)
+  })
+
+  it('does not count a failed handoff', async () => {
+    const { monitor } = makeMonitor({ runAction: failed })
+    monitor.markPending('s1')
+    monitor.settle('s1', 'handoff', false, false)
+    expect(monitor.autoActionsOf('s1')).toBe(0)
+  })
+
+  it('stops proposing compactions once the cap is reached', async () => {
+    const cfg = config({
+      autoHandoffEnabled: false,
+      autoCompactEnabled: true,
+      autoCompactAtContextPercent: 50,
+      maxAutoActionsPerSession: 2,
+      evaluateIntervalMs: 0,
+    })
+    const runAction = vi.fn(failed)
+    const { monitor } = makeMonitor({ cfg, runAction })
+
+    // Two qualifying observations establish the baseline, then each further
+    // one fires. Every fired action fails and consumes one budget slot.
+    for (let seq = 1; seq <= 8; seq += 1) {
+      monitor.onSessionEvent('s1', { type: 'assistant/message', seq, data: {} })
+      await new Promise((resolve) => setTimeout(resolve, 0))
+    }
+
+    expect(monitor.autoActionsOf('s1')).toBe(2)
+    // Baseline + exactly two actions; the cap is what stops the third.
+    expect(runAction).toHaveBeenCalledTimes(2)
+  })
+})
