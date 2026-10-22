@@ -140,3 +140,59 @@ describe('waitForBoundary', () => {
     expect(outcome.error).toBe('等待被取消')
   })
 })
+
+/*
+ * The abort listener must be removed when the wait ends some other way.
+ *
+ * `{ once: true }` only detaches after the listener FIRES, so a wait that
+ * settled via `idle` or the timeout used to leave it attached for the life of
+ * the signal. Today's signals are per-action, but that is an assumption, not a
+ * guarantee — a reused or long-lived signal would accumulate one listener per
+ * wait.
+ */
+describe('waitForBoundary — the abort listener does not outlive the wait', () => {
+  /** Count listeners by wrapping the signal the function will subscribe to. */
+  function countingSignal() {
+    const controller = new AbortController()
+    let attached = 0
+    const add = controller.signal.addEventListener.bind(controller.signal)
+    const remove = controller.signal.removeEventListener.bind(controller.signal)
+    controller.signal.addEventListener = ((...args: Parameters<typeof add>) => {
+      if (args[0] === 'abort') attached += 1
+      return add(...args)
+    }) as typeof add
+    controller.signal.removeEventListener = ((...args: Parameters<typeof remove>) => {
+      if (args[0] === 'abort') attached -= 1
+      return remove(...args)
+    }) as typeof remove
+    return { controller, attached: () => attached }
+  }
+
+  it('removes it when the agent reaches idle first', async () => {
+    const { controller, attached } = countingSignal()
+    const agent: AgentLike = { id: 's1', whenIdle: () => Promise.resolve() }
+
+    const outcome = await waitForBoundary(agent, 1000, controller.signal)
+    expect(outcome.reason).toBe('boundary')
+    expect(attached()).toBe(0)
+  })
+
+  it('removes it when the timeout wins', async () => {
+    const { controller, attached } = countingSignal()
+    const agent: AgentLike = { id: 's1', whenIdle: () => new Promise<void>(() => {}) }
+
+    const outcome = await waitForBoundary(agent, 20, controller.signal)
+    expect(outcome.reason).toBe('timeout')
+    expect(attached()).toBe(0)
+  })
+
+  it('removes it when an already-aborted signal is passed', async () => {
+    const { controller, attached } = countingSignal()
+    controller.abort()
+    const agent: AgentLike = { id: 's1', whenIdle: () => new Promise<void>(() => {}) }
+
+    const outcome = await waitForBoundary(agent, 1000, controller.signal)
+    expect(outcome.reason).toBe('error')
+    expect(attached()).toBe(0)
+  })
+})

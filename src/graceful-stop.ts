@@ -273,10 +273,21 @@ export async function waitForBoundary(
     },
   )
 
+  /*
+   * The abort listener is removed in `finally`, not left on the signal.
+   *
+   * `{ once: true }` only detaches after it FIRES; a wait that ends via `idle`
+   * or the timeout leaves the listener attached for as long as the signal lives.
+   * Today's callers pass a per-action signal that dies with the action, so this
+   * is not a live leak — but it is an unbounded dependency on that assumption,
+   * and a reused or long-lived signal would accumulate one listener per wait.
+   */
+  let onAbort: (() => void) | undefined
   const abort = new Promise<'error'>((resolve) => {
     if (signal === undefined) return
     if (signal.aborted) return resolve('error')
-    signal.addEventListener('abort', () => resolve('error'), { once: true })
+    onAbort = () => resolve('error')
+    signal.addEventListener('abort', onAbort, { once: true })
   })
 
   try {
@@ -296,5 +307,6 @@ export async function waitForBoundary(
     }
   } finally {
     if (timer !== undefined) clearTimeout(timer)
+    if (onAbort !== undefined) signal?.removeEventListener('abort', onAbort)
   }
 }
