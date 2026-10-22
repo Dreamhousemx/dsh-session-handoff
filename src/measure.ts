@@ -65,6 +65,31 @@ const EMPTY_CONTEXT: ContextOccupancy = {
  *
  * Returns `undefined` when the unit is not registered on this deployment, which
  * is not an error: the meter replay below is the documented fallback.
+ *
+ * ## Why `projectedTokens` is computed here, not read
+ *
+ * `sessionProjections.stateOf()` returns the unit's RAW state, not its wire
+ * view: `dsh-session-projection/lib/index.js` `stateOf() { …; return
+ * this.cellFor(registration, session).state }`, while the client-visible value
+ * is produced by a separate `viewCell()` → `wire.view(state)` path. The raw
+ * `contextPressure` state schema is `.strict()` and carries only
+ * `contextWindow`, `pressureTokens`, `surfaceTokens`, `sampledSurfaceTokens`,
+ * and `claim` — **there is no `projectedTokens` field in it at all**.
+ *
+ * An earlier version of this function read `state.projectedTokens`, which is
+ * therefore always `undefined` on a real host: the projected reading never
+ * applied and every occupancy was reported as `exact` from a stale sample.
+ * Its unit test passed because the test helper handed back a hand-built state
+ * containing that field — a shape the host never produces.
+ *
+ * So the derive happens here, using the host's own wire-view formula
+ * (`dsh-token-meter/lib/index.js`, `contextPressureProjectionDefinition.wire`):
+ *
+ *     projectedTokens = max(0, pressureTokens + surfaceTokens - sampledSurfaceTokens)
+ *
+ * Matching the formula rather than calling `snapshot()` keeps this plugin off an
+ * API the host does not declare for plugins, and keeps the two numbers equal by
+ * construction instead of by coincidence.
  */
 function readPressureProjection(
   session: SessionLike,
@@ -78,25 +103,42 @@ function readPressureProjection(
     return undefined
   }
   if (state === null || typeof state !== 'object') return undefined
-  const record = state as { pressureTokens?: unknown; projectedTokens?: unknown; contextWindow?: unknown }
+  const record = state as {
+    pressureTokens?: unknown
+    surfaceTokens?: unknown
+    sampledSurfaceTokens?: unknown
+    contextWindow?: unknown
+  }
+
+  const num = (value: unknown): number | undefined =>
+    typeof value === 'number' && Number.isFinite(value) ? value : undefined
+
+  const pressure = num(record.pressureTokens)
+  const surface = num(record.surfaceTokens)
+  const sampled = num(record.sampledSurfaceTokens)
 
   /*
-   * Same precedence as the UI: a projection that can be projected forward wins,
+   * Same precedence as the UI: a reading that can be projected forward wins,
    * because it answers "how full will the NEXT request be" — which is the
-   * question a handoff threshold is actually asking.
+   * question a handoff threshold is actually asking. All three inputs are
+   * required: with any of them missing the sample cannot be moved forward, and
+   * silently treating the gap as zero would under-report occupancy.
    */
-  const projected = typeof record.projectedTokens === 'number' ? record.projectedTokens : undefined
-  const pressure = typeof record.pressureTokens === 'number' ? record.pressureTokens : undefined
+  const projected =
+    pressure !== undefined && surface !== undefined && sampled !== undefined
+      ? Math.max(0, pressure + surface - sampled)
+      : undefined
+
   const used = projected ?? pressure
   if (used === undefined || !Number.isFinite(used) || used <= 0) return undefined
 
-  const window = typeof record.contextWindow === 'number' ? record.contextWindow : undefined
+  const window = num(record.contextWindow)
   return {
     used,
     /*
      * `pressureTokens` is a provider-reported prompt size, so the reading rests
-     * on real usage. `projectedTokens` adds a heuristic surface delta since
-     * that sample, which makes it an estimate — the same demotion the UI makes.
+     * on real usage. Adding the surface delta since that sample makes it an
+     * estimate — the same demotion the UI makes.
      */
     baseline: projected === undefined ? 'usage' : 'estimated',
     ...(window === undefined ? {} : { window }),

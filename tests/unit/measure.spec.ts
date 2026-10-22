@@ -16,9 +16,40 @@ function meter(measured: unknown): TokenMeterLike {
   return { measure: () => measured as never }
 }
 
-/** A projections registry whose `contextPressure` unit answers `state`. */
-function pressure(state: unknown): { stateOf: (s: unknown, key: string) => unknown } {
+/**
+ * A projections registry whose `contextPressure` unit answers one RAW state.
+ *
+ * The state must have the shape `stateOf()` returns, not the client-visible
+ * wire view: `dsh-session-projection/lib/index.js` `stateOf()` returns
+ * `cellFor(...).state`, and only `snapshot()`/`viewCell()` run `wire.view()`.
+ * The raw `contextPressure` state schema (`dsh-token-meter/lib/index.js`) is
+ * `.strict()` over `contextWindow`, `pressureTokens`, `surfaceTokens`,
+ * `sampledSurfaceTokens`, and `claim` — it does NOT contain `projectedTokens`.
+ *
+ * An earlier version of this helper accepted a hand-built state carrying
+ * `projectedTokens`, so every test passed while the production path read an
+ * always-undefined field. `pressureState()` exists to make that impossible:
+ * it takes the three raw inputs and never a pre-computed projection.
+ */
+function pressureState(state: unknown): { stateOf: (s: unknown, key: string) => unknown } {
   return { stateOf: (_s, key) => (key === 'contextPressure' ? state : undefined) }
+}
+
+/** Raw `contextPressure` state from the host's own three inputs. */
+function rawPressure(input: {
+  pressureTokens?: number
+  surfaceTokens?: number
+  sampledSurfaceTokens?: number
+  contextWindow?: number
+}): Record<string, unknown> {
+  const state: Record<string, unknown> = {}
+  if (input.pressureTokens !== undefined) state.pressureTokens = input.pressureTokens
+  /* `surfaceTokens` is REQUIRED by the host schema; default it to 0 so a state
+   * built from pressure alone still validates as the host would produce. */
+  state.surfaceTokens = input.surfaceTokens ?? 0
+  if (input.sampledSurfaceTokens !== undefined) state.sampledSurfaceTokens = input.sampledSurfaceTokens
+  if (input.contextWindow !== undefined) state.contextWindow = input.contextWindow
+  return state
 }
 
 describe('readContextOccupancy — agreement with the composer meter', () => {
@@ -28,22 +59,30 @@ describe('readContextOccupancy — agreement with the composer meter', () => {
   // tests pin the projection-first rule that removes the disagreement.
   const s = session({ requestContext: () => ({ contextWindow: 1_000_000 }) })
 
-  it('prefers projectedTokens over pressureTokens, like the UI', () => {
+  it('derives projectedTokens from the raw state and prefers it', () => {
+    // pressure + surface - sampled = 274_086 + 6_000 - 0 = 280_086
     const result = readContextOccupancy(
       s,
       meter({ surfaceTokens: 999_999 }),
-      pressure({ pressureTokens: 274_086, projectedTokens: 280_000, contextWindow: 1_000_000 }),
+      pressureState(
+        rawPressure({
+          pressureTokens: 274_086,
+          surfaceTokens: 6_000,
+          sampledSurfaceTokens: 0,
+          contextWindow: 1_000_000,
+        }),
+      ),
     )
-    expect(result.used).toBe(280_000)
-    expect(result.percent).toBeCloseTo(0.28)
+    expect(result.used).toBe(280_086)
+    expect(result.percent).toBeCloseTo(0.280086)
     expect(result.source).toBe('contextPressure')
   })
 
-  it('falls back to pressureTokens when no projection is available', () => {
+  it('uses pressureTokens alone when the sample cannot be projected forward', () => {
     const result = readContextOccupancy(
       s,
       meter({ surfaceTokens: 999_999 }),
-      pressure({ pressureTokens: 274_086, contextWindow: 1_000_000 }),
+      pressureState(rawPressure({ pressureTokens: 274_086, contextWindow: 1_000_000 })),
     )
     expect(result.used).toBe(274_086)
     // A provider-reported sample is exact, exactly as the UI treats it.
@@ -55,10 +94,51 @@ describe('readContextOccupancy — agreement with the composer meter', () => {
     const result = readContextOccupancy(
       s,
       undefined,
-      pressure({ pressureTokens: 274_086, projectedTokens: 280_000, contextWindow: 1_000_000 }),
+      pressureState(
+        rawPressure({
+          pressureTokens: 274_086,
+          surfaceTokens: 6_000,
+          sampledSurfaceTokens: 0,
+          contextWindow: 1_000_000,
+        }),
+      ),
     )
     expect(result.baseline).toBe('estimated')
     expect(result.quality).toBe('estimated')
+  })
+
+  /*
+   * Shape guard: the host never puts `projectedTokens` in the raw state, and a
+   * projection smuggled into it must not change the answer. If someone
+   * reintroduces a read of that field, this case fails.
+   */
+  it('ignores a projectedTokens smuggled into the raw state', () => {
+    const smuggled = {
+      ...rawPressure({ pressureTokens: 274_086, contextWindow: 1_000_000 }),
+      projectedTokens: 900_000,
+    }
+    const result = readContextOccupancy(s, undefined, pressureState(smuggled))
+    expect(result.used).toBe(274_086)
+    expect(result.quality).toBe('exact')
+  })
+
+  it('clamps a projection that would go negative to zero and falls back', () => {
+    // surface shrank below the sample (e.g. after a compaction): max(0, …) = 0,
+    // which is not a usable numerator, so the sample alone answers.
+    const result = readContextOccupancy(
+      s,
+      undefined,
+      pressureState(
+        rawPressure({
+          pressureTokens: 10_000,
+          surfaceTokens: 0,
+          sampledSurfaceTokens: 50_000,
+          contextWindow: 1_000_000,
+        }),
+      ),
+    )
+    expect(result.used).toBe(0)
+    expect(result.source).toBe('none')
   })
 
   it('takes the window from the projection when the session reports none', () => {
@@ -66,14 +146,14 @@ describe('readContextOccupancy — agreement with the composer meter', () => {
     const result = readContextOccupancy(
       noWindow,
       undefined,
-      pressure({ pressureTokens: 250_000, contextWindow: 1_000_000 }),
+      pressureState(rawPressure({ pressureTokens: 250_000, contextWindow: 1_000_000 })),
     )
     expect(result.window).toBe(1_000_000)
     expect(result.percent).toBeCloseTo(0.25)
   })
 
   it('falls back to the meter when the unit is not registered', () => {
-    const result = readContextOccupancy(s, meter({ surfaceTokens: 170_000 }), pressure(undefined))
+    const result = readContextOccupancy(s, meter({ surfaceTokens: 170_000 }), pressureState(undefined))
     expect(result.used).toBe(170_000)
     expect(result.source).toBe('meter-surface')
   })
@@ -90,13 +170,13 @@ describe('readContextOccupancy — agreement with the composer meter', () => {
   })
 
   it('ignores a projection with no usable numerator', () => {
-    const result = readContextOccupancy(s, meter({ surfaceTokens: 170_000 }), pressure({ contextWindow: 1_000_000 }))
+    const result = readContextOccupancy(s, meter({ surfaceTokens: 170_000 }), pressureState(rawPressure({ contextWindow: 1_000_000 })))
     expect(result.used).toBe(170_000)
     expect(result.source).toBe('meter-surface')
   })
 
   it('is unavailable when neither a projection nor a meter answers', () => {
-    const result = readContextOccupancy(s, undefined, pressure(undefined))
+    const result = readContextOccupancy(s, undefined, pressureState(undefined))
     expect(result.quality).toBe('unavailable')
     expect(result.source).toBe('none')
   })
@@ -117,7 +197,7 @@ describe('readContextOccupancy — agreement with the composer meter', () => {
       totalTokens: 274_919,
       baseline: { kind: 'usage' },
     })
-    const liveProjection = pressure({ pressureTokens: 274_086, contextWindow: 1_000_000 })
+    const liveProjection = pressureState(rawPressure({ pressureTokens: 274_086, contextWindow: 1_000_000 }))
 
     const before = readContextOccupancy(live, surfaceMeter)
     expect(Math.round(before.percent! * 100)).toBe(32)
