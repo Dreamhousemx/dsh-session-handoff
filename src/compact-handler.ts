@@ -104,10 +104,37 @@ export async function compact(
   return { kind: 'failed', code: lastCode, message: lastMessage, retryable: true }
 }
 
+/**
+ * The stable failure class of one thrown compaction error.
+ *
+ * `ManualCompactionError` carries `code` — but the host's `compactNow` wraps
+ * EVERY failure in `new ManualCompactionError('busy', …)` with the real cause
+ * attached as `{ cause }` (`dsh-compaction-basic` `compactNow`). A summarization
+ * that genuinely broke was therefore reported as "压缩服务繁忙", retried three
+ * times for nothing, and its real reason never reached the user.
+ *
+ * So a `busy` is treated as a claim to verify rather than a fact: when a cause
+ * classifies as something else, that classification wins. `busy` still retries
+ * when the cause says nothing — the "idle agent required" case really is
+ * transient.
+ *
+ * Walked one level deep on purpose: the host attaches the original error
+ * directly, and chasing an arbitrary cause chain risks surfacing a code from
+ * an unrelated layer.
+ */
 function errorCodeOf(error: unknown): string {
-  if (typeof error === 'object' && error !== null && 'code' in error) {
-    const code = (error as { code?: unknown }).code
-    if (typeof code === 'string') return code
-  }
-  return 'unknown'
+  const code = codeOf(error)
+  if (code !== undefined && code !== 'busy') return code
+  const cause = typeof error === 'object' && error !== null ? (error as { cause?: unknown }).cause : undefined
+  const causeCode = codeOf(cause)
+  if (causeCode !== undefined && causeCode !== 'busy') return causeCode
+  return code ?? 'unknown'
+}
+
+/** The `code` field of one value, when it is a non-empty string. */
+function codeOf(value: unknown): string | undefined {
+  if (typeof value !== 'object' || value === null) return undefined
+  if (!('code' in value)) return undefined
+  const code = (value as { code?: unknown }).code
+  return typeof code === 'string' && code.length > 0 ? code : undefined
 }

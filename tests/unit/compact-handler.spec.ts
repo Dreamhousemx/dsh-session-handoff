@@ -129,3 +129,64 @@ describe('compact', () => {
     expect(outcome).toMatchObject({ kind: 'failed', code: 'no-agent' })
   })
 })
+
+/*
+ * The host wraps every compaction failure as `ManualCompactionError('busy', …)`
+ * with the real error attached as `{ cause }` (`dsh-compaction-basic`
+ * `compactNow`). Taking `busy` at face value retried a genuinely broken
+ * summarization three times and reported "压缩服务繁忙" instead of the reason.
+ */
+describe('compact — a wrapped `busy` is verified against its cause', () => {
+  async function outcomeFor(error: unknown) {
+    let attempts = 0
+    const out = await compact(agent, {
+      compaction: {
+        compactNow: async () => {
+          attempts += 1
+          throw error
+        },
+      } as never,
+      waitIdle: async () => {},
+      sleep: async () => {},
+      signal: new AbortController().signal,
+      interruptedRunningTurn: false,
+    })
+    return { out, attempts }
+  }
+
+  it('reports the real cause instead of `busy`, and does not retry', async () => {
+    const wrapped = Object.assign(new Error('manual compaction requires an idle agent'), {
+      code: 'busy',
+      cause: Object.assign(new Error('summarization produced no text summary content'), {
+        code: 'summary',
+      }),
+    })
+    const { out, attempts } = await outcomeFor(wrapped)
+    expect(out).toEqual(
+      expect.objectContaining({ kind: 'failed', code: 'summary', retryable: false }),
+    )
+    expect(attempts).toBe(1)
+  })
+
+  it('still retries a `busy` whose cause says nothing', async () => {
+    const bare = Object.assign(new Error('requires an idle agent'), { code: 'busy' })
+    const { out, attempts } = await outcomeFor(bare)
+    expect(attempts).toBe(COMPACT_MAX_RETRIES + 1)
+    expect(out).toEqual(expect.objectContaining({ kind: 'failed', code: 'busy' }))
+  })
+
+  it('keeps a non-busy code without looking at the cause', async () => {
+    const direct = Object.assign(new Error('cancelled'), {
+      code: 'cancelled',
+      cause: Object.assign(new Error('inner'), { code: 'summary' }),
+    })
+    const { out, attempts } = await outcomeFor(direct)
+    expect(out).toEqual(expect.objectContaining({ code: 'cancelled' }))
+    expect(attempts).toBe(1)
+  })
+
+  it('survives a non-object throw', async () => {
+    const { out } = await outcomeFor('a string, not an Error')
+    expect(out.kind).toBe('failed')
+  })
+})
