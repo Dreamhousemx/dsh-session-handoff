@@ -545,6 +545,23 @@ export async function deliverBrief(
      * and requires `plugin:<package>`, which is what the released V3 `'plugin'`
      * wrapper is rewritten into. Using the bare value delivered the message and
      * then failed the turn.
+     *
+     * ## The missing `id` is supplied by someone else
+     *
+     * This payload carries no `id`. Nothing here fails because of that —
+     * `Session.append`'s `validateSessionEventData` (`dsh-session/lib/index.js`
+     * line 242) only enforces identity for the seed/restore path, not for a
+     * live append — but the message still needs one to reach the log, and in
+     * the delivery that actually happened the id was minted downstream by the
+     * profile's context plugin (`dshctx-769dd55f-…`, which is the delivered
+     * brief at seq 9 of `session-891322e6`).
+     *
+     * So delivery currently depends on a field this function never sets and on
+     * a package this plugin does not declare. It works on this profile; a
+     * deployment without that middle layer would deliver a message the host
+     * cannot identify. Left as-is rather than minting an id here, because the
+     * host's own id format is not part of any contract this plugin can read —
+     * recorded so the coupling is not rediscovered as a mystery failure.
      */
     await agent.followup(
       {

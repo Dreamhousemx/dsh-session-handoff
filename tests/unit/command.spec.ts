@@ -118,6 +118,76 @@ describe('renderStatus', () => {
     expect(text).toContain('- 上下文占用：70049 tokens')
   })
 
+  /*
+   * One sentence covered five different causes, and two of them were wrong.
+   *
+   * Measured on the live host:
+   *   - `session-05402558-…` (a fork from 9-30) is not loaded in this process,
+   *     and `/state` reported `{"quality":"unavailable","used":0}` — the status
+   *     line would have blamed the model for not reporting a window.
+   *   - A loaded session with a known window and an empty surface printed
+   *     "0 / 1000000 tokens · 未知（模型未上报上下文窗口）", denying the window
+   *     it had just displayed.
+   *
+   * Each cause now names itself.
+   */
+  it('blames the missing session, not the model, when the session is not loaded', () => {
+    const text = renderStatus({
+      ...baseStatus,
+      occupancy: { quality: 'unavailable', used: 0, window: undefined, percent: undefined, reason: 'no-session' },
+    })
+
+    expect(text).toContain('该会话未加载到当前进程')
+    expect(text).not.toContain('模型未上报上下文窗口')
+  })
+
+  it('reports an empty surface as empty, without denying the window it prints', () => {
+    const text = renderStatus({
+      ...baseStatus,
+      occupancy: {
+        quality: 'unavailable',
+        used: 0,
+        window: 1_000_000,
+        percent: undefined,
+        reason: 'empty-surface',
+        source: 'contextPressure',
+      },
+    })
+
+    expect(text).toContain('- 上下文占用：0 / 1000000 tokens · 空（当前可见表面为空）')
+    expect(text).not.toContain('模型未上报上下文窗口')
+  })
+
+  it('keeps the model sentence for the one case that really is about the model', () => {
+    const text = renderStatus({
+      ...baseStatus,
+      occupancy: {
+        quality: 'estimated',
+        used: 120_000,
+        window: undefined,
+        percent: undefined,
+        reason: 'no-window',
+        source: 'contextPressure',
+      },
+    })
+
+    expect(text).toContain('未知（模型未上报上下文窗口）')
+  })
+
+  it('distinguishes a deployment without measurement services from a broken measurement', () => {
+    const noSource = renderStatus({
+      ...baseStatus,
+      occupancy: { quality: 'unavailable', used: 0, window: undefined, percent: undefined, reason: 'no-source' },
+    })
+    expect(noSource).toContain('没有 sessionProjections / tokenMeter')
+
+    const failed = renderStatus({
+      ...baseStatus,
+      occupancy: { quality: 'unavailable', used: 0, window: undefined, percent: undefined, reason: 'error' },
+    })
+    expect(failed).toContain('测量失败')
+  })
+
   it('shows the thresholds once automation is on', () => {
     const text = renderStatus({
       ...baseStatus,

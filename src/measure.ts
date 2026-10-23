@@ -41,7 +41,44 @@ export interface ContextOccupancy {
   readonly source?: 'contextPressure' | 'meter-surface' | 'none'
   /** Populated only when measurement failed. */
   readonly error?: string
+  /**
+   * Why `percent` is absent, when it is.
+   *
+   * Five different situations used to collapse into one status sentence,
+   * "未知（模型未上报上下文窗口）" — and two of them were actively wrong:
+   *
+   * - A session that is not loaded into this process has no handle to read at
+   *   all, so nothing can be said about its window. That is not the model
+   *   failing to report one.
+   * - A loaded session with a known window but an empty surface printed
+   *   "0 / 1000000 tokens · 未知（模型未上报上下文窗口）" — the line contradicts
+   *   itself by showing the window it claims not to have.
+   *
+   * Naming the cause keeps the report diagnosable from the output alone, the
+   * same rule `source` follows. Optional so older callers/fixtures compile.
+   */
+  readonly reason?: OccupancyReason
 }
+
+/**
+ * Why an occupancy could not be expressed as a percentage.
+ *
+ * `no-session` is about this host's memory, `no-source` about the deployment's
+ * services, and `empty-surface` about the conversation itself. Reporting one as
+ * another is what made a missing session look like a model that hides its
+ * context window.
+ */
+export type OccupancyReason =
+  /** The session handle could not be resolved (not loaded in this process). */
+  | 'no-session'
+  /** Neither `sessionProjections` nor `tokenMeter` exists on this deployment. */
+  | 'no-source'
+  /** Sources answered, but the model-visible surface is empty. */
+  | 'empty-surface'
+  /** Tokens were measured, but the routed model reports no window. */
+  | 'no-window'
+  /** A source threw; `error` carries its message. */
+  | 'error'
 
 /** Cumulative spend: total tokens billed across the whole session. */
 export interface CumulativeUsage {
@@ -172,7 +209,17 @@ export function readContextOccupancy(
   tokenMeter: TokenMeterLike | undefined,
   projections?: SessionProjectionsLike,
 ): ContextOccupancy {
-  if (session === undefined) return EMPTY_CONTEXT
+  if (session === undefined) {
+    /*
+     * No session handle: this process does not have the session loaded.
+     *
+     * This is the case the old status line called "模型未上报上下文窗口", which
+     * points the reader at the model when the real answer is "this host cannot
+     * see this session". A session restored in the browser but never resumed,
+     * or any session from a previous process, lands here.
+     */
+    return { ...EMPTY_CONTEXT, reason: 'no-session' }
+  }
 
   const fromProjection = readPressureProjection(session, projections)
 
@@ -185,11 +232,12 @@ export function readContextOccupancy(
         ...EMPTY_CONTEXT,
         quality: 'unavailable',
         error: error instanceof Error ? error.message : String(error),
+        reason: 'error',
       }
     }
   } else if (fromProjection === undefined) {
     // No projection and no meter: nothing can be measured on this deployment.
-    return EMPTY_CONTEXT
+    return { ...EMPTY_CONTEXT, reason: 'no-source' }
   }
 
   const used =
@@ -233,12 +281,21 @@ export function readContextOccupancy(
     typeof window === 'number' && Number.isFinite(window) && window > 0 ? window : undefined
 
   if (used <= 0) {
+    /*
+     * Sources answered and the surface is empty.
+     *
+     * `window` is deliberately kept: a fresh session legitimately occupies
+     * nothing of a known window, and hiding the window made the status line
+     * print "0 / 1000000 tokens · 未知（模型未上报上下文窗口）" — a sentence that
+     * denies the number it just displayed.
+     */
     return {
       ...EMPTY_CONTEXT,
       quality: 'unavailable',
       window: usableWindow,
       baseline,
       source: fromProjection === undefined ? 'meter-surface' : 'contextPressure',
+      reason: 'empty-surface',
     }
   }
 
@@ -249,6 +306,7 @@ export function readContextOccupancy(
     percent: usableWindow === undefined ? undefined : used / usableWindow,
     baseline,
     source: fromProjection === undefined ? 'meter-surface' : 'contextPressure',
+    ...(usableWindow === undefined ? { reason: 'no-window' as const } : {}),
   }
 }
 

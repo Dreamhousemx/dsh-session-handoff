@@ -11,6 +11,7 @@
  * with the list of valid words.
  */
 import type { ActionResult } from './types.ts'
+import type { OccupancyReason } from './measure.ts'
 
 /** What a command handler needs from the plugin. */
 export interface CommandDeps {
@@ -89,6 +90,8 @@ export function renderStatus(input: {
     percent?: number | undefined
     /** Which accessor produced the number; omitted by callers that do not care. */
     source?: 'contextPressure' | 'meter-surface' | 'none' | undefined
+    /** Why `percent` is absent; see `OccupancyReason` in measure.ts. */
+    reason?: OccupancyReason | undefined
   }
   cumulative: { tokens: number; source: string }
   thresholds: { handoffPercent: number; compactPercent: number; cumulative: number; enabled: boolean; compactEnabled: boolean }
@@ -101,8 +104,22 @@ export function renderStatus(input: {
 }): string {
   const { occupancy, cumulative, thresholds } = input
 
-  const percent =
-    occupancy.percent === undefined ? '未知（模型未上报上下文窗口）' : `${Math.round(occupancy.percent * 100)}%`
+  /*
+   * Say which of the five situations this is, instead of blaming the model for
+   * all of them.
+   *
+   * Every absent percentage used to print "未知（模型未上报上下文窗口）". Two of
+   * the cases that reached this line had nothing to do with the model:
+   *
+   * - an unloaded session (no handle to read), and
+   * - a loaded session whose surface is simply empty, where the line then also
+   *   printed the window it claimed not to have: "0 / 1000000 tokens · 未知
+   *   （模型未上报上下文窗口）".
+   *
+   * The reason travels with the measurement (measure.ts), so this renderer does
+   * not have to guess from `window === undefined`.
+   */
+  const percent = occupancy.percent === undefined ? missingPercentText(occupancy) : `${Math.round(occupancy.percent * 100)}%`
   const window = occupancy.window === undefined ? '' : ` / ${occupancy.window}`
   const quality =
     occupancy.quality === 'exact' ? '精确' : occupancy.quality === 'estimated' ? '估算' : '不可用'
@@ -157,4 +174,34 @@ export function renderStatus(input: {
 /** Collapse a multi-line verdict into a single status line. */
 function oneLine(text: string): string {
   return text.split('\n').filter((ln) => ln.trim().length > 0).join(' · ')
+}
+
+/**
+ * The text standing in for an absent percentage, one sentence per cause.
+ *
+ * Five situations produce "no percentage", and only one of them is about the
+ * model. Printing the model sentence for all five sent readers looking at the
+ * wrong layer — a session missing from memory looked like a model hiding its
+ * window, and an empty conversation looked the same as an unmeasurable one.
+ *
+ * `undefined` reason falls back to the old wording: a caller that builds an
+ * occupancy by hand (older fixtures) still gets a sentence rather than
+ * `undefined`.
+ */
+function missingPercentText(occupancy: { reason?: OccupancyReason | undefined }): string {
+  switch (occupancy.reason) {
+    case 'no-session':
+      return '未知（该会话未加载到当前进程，无法测量）'
+    case 'no-source':
+      return '未知（当前部署没有 sessionProjections / tokenMeter，无法测量）'
+    case 'empty-surface':
+      // The window is printed beside this, so it must not deny one.
+      return '空（当前可见表面为空）'
+    case 'no-window':
+      return '未知（模型未上报上下文窗口）'
+    case 'error':
+      return '未知（测量失败）'
+    default:
+      return '未知（模型未上报上下文窗口）'
+  }
 }

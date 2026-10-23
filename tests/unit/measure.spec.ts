@@ -13,6 +13,7 @@ import {
   type SessionLike,
   type TokenMeterLike,
 } from '@src/contracts.ts'
+import { readPendingInput } from '@src/session-summary.ts'
 
 function session(overrides: Partial<SessionLike> = {}): SessionLike {
   return { id: 's1', ...overrides }
@@ -271,6 +272,57 @@ describe('readContextOccupancy', () => {
     expect(readContextOccupancy(session(), undefined).quality).toBe('unavailable')
   })
 
+  /*
+   * `reason` exists so the status line can name the actual cause instead of
+   * printing "模型未上报上下文窗口" for all five of them. These assertions pin
+   * which cause each path reports; without them a later refactor could merge
+   * two cases again and no test would notice.
+   *
+   * The live evidence for the two that used to be misreported:
+   *   - an unloaded fork session (`05402558`) reported `used: 0`, and the
+   *     status line called it a model problem;
+   *   - a loaded session with `window: 1000000` and `used: 0` printed
+   *     "0 / 1000000 tokens · 未知（模型未上报上下文窗口）".
+   */
+  it('names the cause of a missing percentage', () => {
+    // No handle at all: the session is not loaded in this process.
+    expect(readContextOccupancy(undefined, meter({ surfaceTokens: 1 })).reason).toBe('no-session')
+
+    // Neither source exists on this deployment.
+    expect(readContextOccupancy(session(), undefined).reason).toBe('no-source')
+
+    // Sources answered, surface is empty -- the window is still reported.
+    const empty = readContextOccupancy(
+      session({ requestContext: () => ({ contextWindow: 1_000_000 }) }),
+      meter({ surfaceTokens: 0, baseline: { kind: 'none' } }),
+    )
+    expect(empty.reason).toBe('empty-surface')
+    expect(empty.window).toBe(1_000_000)
+
+    // Tokens measured, but the model declares no window.
+    const noWindow = readContextOccupancy(session({ requestContext: () => ({}) }), meter({ surfaceTokens: 10 }))
+    expect(noWindow.reason).toBe('no-window')
+    expect(noWindow.used).toBe(10)
+  })
+
+  it('marks a throwing meter as a measurement error, not a missing model window', () => {
+    const throwing: TokenMeterLike = {
+      measure: () => {
+        throw new Error('boom')
+      },
+    }
+    expect(readContextOccupancy(session(), throwing).reason).toBe('error')
+  })
+
+  it('reports no reason when a percentage is available', () => {
+    const result = readContextOccupancy(
+      session({ requestContext: () => ({ contextWindow: 1000 }) }),
+      meter({ surfaceTokens: 250 }),
+    )
+    expect(result.percent).toBe(0.25)
+    expect(result.reason).toBeUndefined()
+  })
+
   it('survives a requestContext that throws', () => {
     const s = session({
       requestContext: () => {
@@ -488,3 +540,128 @@ describe('sessionEvents — a fork is the whole conversation, not its own share'
     expect(sessionEvents(partial)).toEqual(own)
   })
 })
+
+/*
+ * The same defect, measured on a REAL fork instead of a hand-written fixture.
+ *
+ * Source: `session-05402558-bae6-4444-b4e9-c3deeb37ba11`, a subagent side
+ * thread forked from `session-b01f9f16-…` on 2026-09-30. Its whole log was
+ * replayed through the host's own `Session.fromRestore`
+ * (`dsh-session/lib/index.js`), which reported:
+ *
+ *     snapshotEvents().length = 112      ownEvents().length = 2
+ *     inheritedEventCount     = 110      header.isSeeded   = true
+ *     ownEvents() = [session/end-seed, session/title]
+ *
+ * Those two numbers are the fixture. They are not invented: on a fork of this
+ * shape the session's entire conversation is inherited, so `ownEvents()` holds
+ * no user message and no turn, and the pre-fix `activityCheck` refused the
+ * handoff with "当前没有可迁移的活动会话". The synthetic fixture above covers
+ * the shape; this one covers the shape the host actually produced.
+ *
+ * The structural constants below are the ones read off that log: one
+ * `turn/start` (seq 12), three `user/message` (16, 17, 18), the only
+ * `request/context` at seq 20 carrying `contextWindow: 1_000_000`, and a final
+ * surface event of `tool/result` at seq 104 — which is why I-1's
+ * "assistant spoke last" branch correctly stays silent for this session.
+ */
+describe('a real fork whose whole history is inherited', () => {
+  const TOTAL = 112
+  const INHERITED = 110
+
+  /**
+   * The real event types, in their real order, byte-for-byte from the log.
+   *
+   * Deliberately NOT collapsed into runs: the indices are the evidence. A
+   * run-length summary asserted earlier put `step/start` at 14 and pushed the
+   * three user messages to 15-17, which silently moved the inherited cut and
+   * made the "exactly two own events" claim true for the wrong reason. The
+   * literal list keeps every index meaningful.
+   */
+  const TYPES: readonly string[] = [
+    'permission/preset', 'sandbox/mode', 'approval/policy', 'command/run',
+    'permission/preset', 'sandbox/mode', 'approval/policy', 'agent/inbox/spliced',
+    'command/done', 'agent/inbox/spliced', 'session/end-seed', 'agent/inbox/spliced',
+    'turn/start', 'agent/inbox/spliced', 'step/start', 'system/message',
+    'user/message', 'user/message', 'user/message', 'request/header',
+    'request/context', 'session/title', 'session/title-llm-request', 'session/title',
+    'assistant/message', 'tool/call', 'tool/result', 'tool/call',
+    'tool/result', 'step/end', 'step/start', 'assistant/message',
+    'tool/call', 'tool/result', 'tool/call', 'tool/result',
+    'step/end', 'step/start', 'assistant/message', 'tool/call',
+    'tool/result', 'tool/call', 'tool/result', 'step/end',
+    'step/start', 'assistant/message', 'tool/call', 'tool/call',
+    'tool/call', 'tool/call', 'tool/result', 'tool/result',
+    'tool/result', 'tool/result', 'step/end', 'step/start',
+    'assistant/message', 'tool/call', 'tool/result', 'tool/call',
+    'tool/result', 'step/end', 'step/start', 'assistant/message',
+    'tool/call', 'tool/result', 'step/end', 'step/start',
+    'assistant/message', 'tool/call', 'tool/result', 'tool/call',
+    'tool/result', 'step/end', 'step/start', 'assistant/message',
+    'tool/call', 'tool/result', 'tool/call', 'tool/result',
+    'step/end', 'step/start', 'assistant/message', 'tool/call',
+    'tool/result', 'step/end', 'step/start', 'assistant/message',
+    'tool/call', 'tool/result', 'step/end', 'step/start',
+    'assistant/message', 'tool/call', 'tool/result', 'step/end',
+    'step/start', 'assistant/message', 'tool/call', 'tool/result',
+    'step/end', 'step/start', 'assistant/message', 'tool/call',
+    'tool/result', 'step/end', 'step/start', 'step/end',
+    'turn/end', 'subagent/descriptor', 'session/end-seed', 'session/title',
+  ]
+
+  const events = TYPES.map((type, seq) => ({
+    type,
+    seq,
+    // The one inherited envelope: real seq, real window.
+    ...(type === 'request/context' ? { data: { contextWindow: 1_000_000 } } : { data: {} }),
+  }))
+
+  it('is the real 112-event log, with its real cut point', () => {
+    expect(events).toHaveLength(TOTAL)
+    // The structural claims this fixture exists to make, each at its real index.
+    expect(events[12]?.type).toBe('turn/start')
+    expect(events.slice(16, 19).map((e) => e.type)).toEqual([
+      'user/message', 'user/message', 'user/message',
+    ])
+    expect(events[20]?.type).toBe('request/context')
+    expect(events[20]?.data['contextWindow']).toBe(1_000_000)
+    // I-1's "assistant spoke last" branch must stay silent: this log ends on a
+    // tool result, not an assistant message.
+    expect(events[104]?.type).toBe('tool/result')
+    expect(events.slice(INHERITED).map((e) => e.type)).toEqual([
+      'session/end-seed', 'session/title',
+    ])
+  })
+
+  it('reproduces the host structure that makes ownEvents empty', () => {
+    const own = events.slice(INHERITED)
+    expect(own.some((event) => event.type === 'user/message' || event.type === 'turn/start')).toBe(false)
+  })
+
+  const session = {
+    id: 'session-05402558-bae6-4444-b4e9-c3deeb37ba11',
+    snapshotEvents: () => [...events],
+    ownEvents: () => events.slice(INHERITED),
+  } as never
+
+  it('passes the blank-session check that refused this handoff before the fix', () => {
+    const whole = sessionEvents(session)
+    expect(whole).toHaveLength(TOTAL)
+    expect(whole.filter((e) => e.type === 'user/message')).toHaveLength(3)
+    expect(whole.some((e) => e.type === 'turn/start')).toBe(true)
+  })
+
+  it('finds the inherited context window instead of reporting none', () => {
+    expect(windowFromEvents(sessionEvents(session))).toBe(1_000_000)
+    expect(windowFromEvents(ownSessionEvents(session))).toBeUndefined()
+  })
+
+  it('stays silent about a pending question, because this log ends on a tool result', () => {
+    const surface = sessionEvents(session).filter((event) =>
+      ['user/message', 'assistant/message', 'tool/result'].includes(event.type),
+    )
+    expect(surface.at(-1)?.type).toBe('tool/result')
+    expect(readPendingInput(session, undefined, sessionEvents(session))).toBeUndefined()
+  })
+})
+

@@ -74,6 +74,28 @@ export interface SessionLike {
   readonly surface?: { readonly nodes?: readonly number[] }
 }
 
+/*
+ * ## Both event accessors are deprecated on the host, and this plugin still uses them
+ *
+ * `dsh-session/lib/index.js` marks `snapshotEvents` (line 1446) and `ownEvents`
+ * (line 1461) `@deprecated`: "new calls are prohibited", citing the Agent Note
+ * on deprecating synchronous session-event reads. They remain the only
+ * synchronous way to answer "what did this conversation contain", which is what
+ * every question in this plugin starts from, so they stay — deliberately, not
+ * by oversight.
+ *
+ * The migration target is not usable from a plugin yet. The host's guidance is
+ * to observe `session/event` and fold projections, which cannot answer for a
+ * session that already exists: a fork from another month, a session restored
+ * from disk, or the outgoing session at handoff time. Recorded here so the next
+ * reader does not find the deprecation and assume this file missed it.
+ *
+ * Consequence to watch: if a future host removes these, `sessionEvents` falls
+ * through to `[]`, `activityCheck` calls every session blank, and `/handoff`
+ * refuses all of them. That failure is loud and lands in the two functions
+ * below, which is the best available mitigation.
+ */
+
 /**
  * The COMPLETE durable log of one session, inherited history included.
  *
