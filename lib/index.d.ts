@@ -138,6 +138,15 @@ declare const ROUTE_PREFIX = "/dsh-session-handoff";
 declare const SETTINGS_ENTRY = "dsh-session-handoff";
 declare function apply(ctx: Context, config: Config): void;
 /**
+ * A never-empty description of one thrown value.
+ *
+ * `dsh-commands` rejects a blank `CommandResult.text` with a `TypeError` raised
+ * inside the registry, so returning `error.message` verbatim turns
+ * `throw new Error()` into an internal command failure. The fallback names the
+ * operation instead of the (absent) message.
+ */
+declare function errorText(error: unknown): string;
+/**
  * Ask the model for the nine sections.
  *
  * `llm.stream` rather than a `generate` helper: the service exposes only the
@@ -150,4 +159,4 @@ declare function requestNarrative(llm: LlmLike, prompt: string, maxTokens: numbe
   model: string;
 }, signal?: AbortSignal): Promise<BriefNarrative>;
 //#endregion
-export { CONFIG_DEFAULTS, Config, ROUTE_PREFIX, SETTINGS_ENTRY, apply, inject, name, requestNarrative, withDefaults };
+export { CONFIG_DEFAULTS, Config, ROUTE_PREFIX, SETTINGS_ENTRY, apply, errorText, inject, name, requestNarrative, withDefaults };

@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { apply, Config, CONFIG_DEFAULTS, name, ROUTE_PREFIX, SETTINGS_ENTRY, withDefaults } from '@src/index'
+import { apply, Config, CONFIG_DEFAULTS, errorText, name, ROUTE_PREFIX, SETTINGS_ENTRY, withDefaults } from '@src/index'
 import { validateSettings } from '@src/settings'
 
 /**
@@ -291,6 +291,55 @@ describe('host contract shapes (0.2.1)', () => {
 
     fake.emit('session/event', { id: 's1' }, { type: 'assistant/message', seq: 2, data: {} })
     expect(sessionsGet).toHaveBeenCalled()
+  })
+
+  /*
+   * `dsh-commands` validates the handler's RESULT, not just its shape:
+   * a blank `text` on an `error` result throws
+   * `command "handoff" error text must be a non-empty string`
+   * (`normalizeResult`, dsh-commands/lib/index.js:198). That throw happens
+   * inside the registry, after the handler returned, so the user sees an
+   * internal command failure instead of the reason.
+   *
+   * `new Error()` with no argument has `message === ''`, so returning
+   * `error.message` verbatim made this reachable. The plugin now substitutes a
+   * non-empty sentence.
+   */
+  it('never returns a blank error text, which the host rejects', async () => {
+    /*
+     * `dsh-commands` validates the handler's RESULT, not just its shape:
+     * a blank `text` on an `error` result throws
+     * `command "handoff" error text must be a non-empty string`
+     * (`normalizeResult`, dsh-commands/lib/index.js:198). The throw happens
+     * inside the registry, after the handler returned, so the user would see an
+     * internal command failure instead of the reason.
+     *
+     * `new Error()` with no argument has `message === ''`, so returning
+     * `error.message` verbatim made that reachable. The conversion is asserted
+     * directly: it is the only piece that can produce blank text.
+     */
+    expect(errorText(new Error('')).trim().length).toBeGreaterThan(0)
+    expect(errorText(new Error('   ')).trim().length).toBeGreaterThan(0)
+    expect(errorText(new Error())).toBe('命令执行失败（未提供原因）')
+    expect(errorText('')).toBe('命令执行失败（未提供原因）')
+    // A real message is preserved verbatim.
+    expect(errorText(new Error('磁盘已满'))).toBe('磁盘已满')
+
+    // And the handler never returns a blank error for a missing agent.
+    let definition: Record<string, unknown> | undefined
+    const fake = fakeContext({
+      commands: {
+        register: (d: Record<string, unknown>) => {
+          definition = d
+          return () => {}
+        },
+      },
+    })
+    apply(fake.ctx as never, baseConfig)
+    const handler = definition!['handler'] as (inv: unknown) => Promise<{ kind: string; text?: string }>
+    const noAgent = await handler({ agent: undefined, rawInput: 'status' })
+    expect(noAgent.kind).toBe('error')
+    expect((noAgent.text ?? '').trim().length).toBeGreaterThan(0)
   })
 })
 

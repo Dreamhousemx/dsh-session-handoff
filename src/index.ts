@@ -589,7 +589,16 @@ export function apply(ctx: Context, config: ConfigShape): void {
               ? { kind: 'success', text: outcome.text }
               : { kind: 'error', text: outcome.text }
           } catch (error) {
-            return { kind: 'error', text: error instanceof Error ? error.message : String(error) }
+            /*
+             * The text must be non-empty: `dsh-commands` validates a handler's
+             * result (`normalizeResult`) and throws
+             * `command "handoff" error text must be a non-empty string` when it
+             * is blank — and it throws it *inside* the registry, after this
+             * handler has already returned, so the user sees an internal
+             * failure instead of the reason. `new Error()` with no argument has
+             * `message === ''`, so an empty message is reachable.
+             */
+            return { kind: 'error', text: errorText(error) }
           }
         },
       })
@@ -845,6 +854,19 @@ function safely<T>(read: () => T | undefined): T | undefined {
   } catch {
     return undefined
   }
+}
+
+/**
+ * A never-empty description of one thrown value.
+ *
+ * `dsh-commands` rejects a blank `CommandResult.text` with a `TypeError` raised
+ * inside the registry, so returning `error.message` verbatim turns
+ * `throw new Error()` into an internal command failure. The fallback names the
+ * operation instead of the (absent) message.
+ */
+export function errorText(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error)
+  return message.trim().length > 0 ? message : '命令执行失败（未提供原因）'
 }
 
 /**

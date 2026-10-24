@@ -94,14 +94,16 @@ dsh plugin --profile <profile> add "file:D:/path/to/dsh-session-handoff"
 
 失败后闩锁一定释放，原会话立即可继续工作。
 
-## 验证情况（本机 dsh 0.2.1-rc.2）
+## 验证情况（本机 dsh 0.2.1-rc.3）
+
+适配记录见 `docs/upgrade-0.2.1-rc.3.md`：逐项核对过宿主 API（会话访问器、`contextPressure` 状态与 wire 公式、`agent/pre-step` 载荷、`llm/stream`、`archiveSession`、命令与路由注册、客户端 `slots` 槽位、loader `insert` patch），只有一处需要改——`dsh-commands` 要求 `error` 结果的 `text` 非空，而 `new Error()` 的 `message` 是空字符串，已修复并加回归用例。
 
 已通过（有证据，非推断）：
 
 | 项 | 证据 |
 | --- | --- |
 | 类型检查 | 宿主 + 浏览器两份 tsconfig 均无错误 |
-| 单元测试 | **164 个用例全绿**（度量、触发、软终止、简报、迁移、压缩、协调器、命令、follower、契约形状、客户端激活） |
+| 单元测试 | **261 个用例全绿**（度量、触发、软终止、简报、迁移、压缩、协调器、命令、follower、契约形状、客户端激活） |
 | 构建产物 | Host ESM `lib/index.js` + Client `lib/client.js`，客户端只 `require("react")`，信封为 `window.__ModuleLoader__.load` |
 | **在真实镜像里激活（宿主）** | 独立 profile 跑 `dsh headless`，**无 "did not activate" 警告**（最小组合与完整 profile 都验过） |
 | **配置 schema 可被宿主投影** | `cordis_inspect` 返回 `status: "schema"`，14 个字段的默认值与范围完整；`limitations: []` |
